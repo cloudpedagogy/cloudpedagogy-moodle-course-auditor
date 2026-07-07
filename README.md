@@ -1,304 +1,341 @@
-
 # CloudPedagogy Moodle Course Auditor
 
-A Python command-line tool for auditing Moodle course backup files (`.mbz`) using Moodle XML metadata.
-
-CloudPedagogy Moodle Course Auditor extracts factual metadata from Moodle backup archives and generates structured reports to support course review, quality assurance, migration planning, content inventory, digital education analysis, and course governance workflows.
-
-The tool is intentionally conservative and evidence-based. It reports what can be derived from Moodle backup XML files and does not inspect the internal contents of uploaded files such as PDFs, Word documents, PowerPoint files, images, videos, SCORM packages, or H5P packages.
-
----
+A Python command-line toolkit for auditing Moodle course backup files
+(`.mbz`) using Moodle XML metadata and generating both structured
+reports and interactive analytics dashboards.
 
 ## Overview
 
-Moodle course backups contain a rich set of XML metadata describing course structure, activities, sections, files, questions, visibility settings, and content relationships.
+CloudPedagogy Moodle Course Auditor extracts factual metadata from
+Moodle backup archives and produces structured outputs to support course
+review, quality assurance, migration planning, curriculum review,
+content inventories, digital education analysis and governance
+workflows.
 
-This tool analyses that metadata and produces structured outputs that help educators, learning designers, learning technologists, quality assurance teams, and Moodle administrators understand the composition and characteristics of a Moodle course without requiring access to a live Moodle environment.
+The platform is intentionally conservative and evidence-based. It
+reports only what can be derived from Moodle backup XML files and does
+**not** inspect the internal contents of uploaded files such as PDFs,
+Word documents, PowerPoint files, images, videos, SCORM packages or H5P
+packages.
 
-The auditor operates entirely from Moodle backup files and does not require direct access to a Moodle server.
+The project now consists of two complementary components:
 
----
+1.  **Moodle MBZ Course Auditor**
+    -   Extracts Moodle XML metadata.
+    -   Produces Markdown, Text, CSV and JSON reports.
+2.  **Interactive Dashboard Generator**
+    -   Reads the auditor outputs.
+    -   Generates a standalone interactive HTML dashboard using Plotly.
+    -   Requires no live Moodle server.
 
-## Recommended Moodle Backup Settings
+------------------------------------------------------------------------
 
-For best results, create Moodle backups with the following options enabled:
+# Recommended Moodle Backup Settings
 
-✅ Activities and resources
+Enable:
 
-✅ Question bank
+-   ✅ Activities and resources
+-   ✅ Question bank
+-   ✅ Content
 
-✅ Content
+For externally shared backups, consider excluding:
 
-These settings generate the XML metadata that the auditor relies upon, including:
+-   Enrolled users
+-   User files
+-   Activity logs
+-   Grades
+-   Other personally identifiable information
 
-```text
-course.xml
-section.xml
-module.xml
-activity XML files
-questions.xml
-files.xml
-```
+------------------------------------------------------------------------
 
-The auditor will often work with partial backups, but reports may be less complete if key course content or question bank information is excluded during backup creation.
+# Key Features
 
-For sharing backups externally, consider excluding:
+## XML Metadata Audit
 
-- Enrolled users
-- User files
-- Activity logs
-- Grades
-- Other personally identifiable information
+-   Audit individual Moodle backups
+-   Batch processing
+-   Recursive processing
+-   Course metadata
+-   Section analysis
+-   Activity inventories
+-   Moodle Book inventories
+-   Hidden content detection
+-   Duplicate activity detection
+-   External dependency detection
+-   External domain inventories
+-   iframe, webCAL and Panopto detection
+-   File metadata analysis
+-   Question metadata analysis
+-   Activity age analysis
+-   CSV reporting
+-   JSON reporting
+-   Markdown reporting
+-   Text reporting
 
-unless those elements are specifically required.
+## Interactive Dashboard Analytics (NEW)
 
----
+Generate a standalone interactive Plotly dashboard directly from the
+audit outputs.
 
-## Key Features
+Features include:
 
-- Audit individual Moodle course backups
-- Batch process multiple Moodle backups
-- Recursive processing of backup collections
-- Course structure and section analysis
-- Activity inventories and activity type summaries
-- Moodle Book inventories
-- Hidden content detection
-- Duplicate activity detection
-- External dependency identification
-- External domain inventories
-- webCAL, iframe and Panopto usage detection
-- File metadata and storage footprint reporting
-- Question metadata analysis
-- Activity modification and age analysis
-- CSV, JSON, Markdown and Text reporting
-- Optional extraction and retention of backup contents
+-   Course overview cards
+-   Activity type visualisations
+-   Section summaries
+-   Book analytics
+-   File footprint visualisations
+-   External dependency analytics
+-   Hidden content summaries
+-   Activity age visualisations
+-   Responsive HTML dashboard
+-   Standalone dashboard (no web server required)
 
----
+The dashboard automatically adapts when optional audit outputs are
+absent. For example, courses without Moodle Books simply omit
+Book-specific visualisations while retaining the remainder of the
+dashboard.
 
-## What the Tool Analyses
+------------------------------------------------------------------------
 
-### Course Metadata
+# What the Tool Analyses
 
-- Course name
-- Short name
-- Course format
-- Visibility settings
-- Start date
-- End date
-- Modification dates
+## Course Metadata
 
-### Sections
+-   Course name
+-   Short name
+-   Format
+-   Visibility
+-   Dates
+-   Modification timestamps
 
-- Section names
-- Section numbering
-- Visibility settings
-- Activity counts
-- Section summaries
+## Sections
 
-### Activities
+-   Names
+-   Numbering
+-   Visibility
+-   Activity counts
 
-- Activity types
-- Activity names
-- Visibility settings
-- Completion settings
-- Modification dates
-- Section placement
+## Activities
 
-### Moodle Books
+-   Activity types
+-   Names
+-   Completion
+-   Visibility
+-   Modification dates
 
-- Book activity inventories
-- Chapter counts
-- Hidden chapter counts
-- Content volume estimates
+## Moodle Books
 
-### External Dependencies
+-   Inventories
+-   Chapter counts
+-   Hidden chapters
+-   XML word estimates
 
-- External links
-- Embedded iframes
-- webCAL references
-- Panopto references
-- External domains
+## External Dependencies
 
-### Files
+-   External links
+-   iframe usage
+-   webCAL
+-   Panopto
+-   External domains
 
-- File counts
-- File extensions
-- MIME types
-- File areas
-- File sizes
-- Largest files
+## Files
 
-### Questions
+-   Counts
+-   Extensions
+-   MIME types
+-   File areas
+-   Sizes
+-   Largest files
 
-- Question counts
-- Question type distributions
+## Questions
 
-### Course Footprint
+-   Counts
+-   Question type distributions
 
-- Content volume estimates
-- Activity distributions
-- Storage footprint
-- Structural characteristics
+## Course Footprint
 
----
+-   Activity distributions
+-   Storage footprint
+-   Structural characteristics
+-   Content volume estimates
 
-## Important Limitations
+------------------------------------------------------------------------
 
-This tool audits Moodle backup XML metadata only.
+# Important Limitations
 
-It does not:
+The auditor analyses Moodle XML metadata only.
 
-- Open PDF files
-- Open Word documents
-- Open PowerPoint files
-- Inspect images
-- Inspect audio files
-- Inspect video files
-- Analyse SCORM package contents
-- Analyse H5P package contents
-- Evaluate accessibility compliance
-- Generate pedagogic quality ratings
-- Generate compliance ratings
-- Generate risk scores
-- Generate severity scores
+It does **not**:
 
-The outputs are intended to be factual and descriptive rather than evaluative.
+-   Open PDFs
+-   Open Word documents
+-   Open PowerPoint files
+-   Inspect images
+-   Inspect audio/video
+-   Analyse SCORM packages
+-   Analyse H5P packages
+-   Generate pedagogic ratings
+-   Generate accessibility ratings
+-   Generate compliance ratings
+-   Generate risk or severity scores
 
----
+------------------------------------------------------------------------
 
-## Moodle Files Analysed
+# Moodle Files Analysed
 
-```text
-course/course.xml
-sections/*/section.xml
-activities/*/module.xml
-activities/*/[activity_type].xml
-files.xml
-questions.xml
-```
+-   course/course.xml
+-   sections/\*/section.xml
+-   activities/\*/module.xml
+-   activities/\*/\[activity_type\].xml
+-   files.xml
+-   questions.xml
 
----
+------------------------------------------------------------------------
 
-## Supported Backup Formats
+# Supported Backup Formats
 
-- Moodle .mbz backups
-- ZIP archives
-- TAR archives
-- TAR.GZ archives
+-   Moodle `.mbz`
+-   ZIP
+-   TAR
+-   TAR.GZ
 
----
+------------------------------------------------------------------------
 
-## Installation
+# Installation
 
-```bash
+``` bash
 git clone https://github.com/cloudpedagogy/cloudpedagogy-moodle-course-auditor.git
 cd cloudpedagogy-moodle-course-auditor
-```
 
-Optional virtual environment:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
+
+pip install pandas plotly
 ```
 
-The current version uses only Python standard library modules and has no external Python package dependencies.
+## Python Dependencies
 
----
+Core auditor: - Python Standard Library only
 
-## Basic Usage
+Dashboard generator: - pandas - plotly
 
-```bash
+------------------------------------------------------------------------
+
+# Basic Usage
+
+## Audit a Moodle backup
+
+``` bash
 python3 moodle_mbz_course_auditor.py course.mbz
 ```
 
----
+## Generate an interactive dashboard
 
-## Output Files
+``` bash
+python3 moodle_dashboard_generator.py moodle_audit_output
+```
 
-Single-course outputs include:
+or
 
-- audit_report.md
-- audit_report.txt
-- course_summary.csv
-- course_characteristics.csv
-- course_footprint.csv
-- section_activity_breakdown.csv
-- book_inventory.csv
-- duplicate_activity_inventory.csv
-- hidden_content_summary.csv
-- hidden_activity_inventory.csv
-- external_dependency_inventory.csv
-- external_domain_inventory.csv
-- file_extension_inventory.csv
-- largest_files.csv
-- modification_year_summary.csv
-- activity_age_summary.csv
-- activities.csv
-- sections.csv
-- files.csv
-- audit_data.json
+``` bash
+python3 moodle_dashboard_generator.py /path/to/moodle_audit_output
+```
 
-Batch mode additionally generates:
+------------------------------------------------------------------------
 
-- combined_course_summary.csv
-- batch_run_log.csv
+# Outputs
 
----
+## Auditor
 
-## Example Use Cases
+-   audit_report.md
+-   audit_report.txt
+-   course_summary.csv
+-   course_characteristics.csv
+-   course_footprint.csv
+-   section_activity_breakdown.csv
+-   book_inventory.csv
+-   duplicate_activity_inventory.csv
+-   hidden_content_summary.csv
+-   hidden_activity_inventory.csv
+-   external_dependency_inventory.csv
+-   external_domain_inventory.csv
+-   file_extension_inventory.csv
+-   largest_files.csv
+-   modification_year_summary.csv
+-   activity_age_summary.csv
+-   activities.csv
+-   sections.csv
+-   files.csv
+-   audit_data.json
 
-- Moodle course auditing
-- Quality assurance reviews
-- Curriculum review activities
-- Course migration planning
-- Platform migration projects
-- Digital education audits
-- Learning design analysis
-- Moodle Book inventories
-- Legacy content discovery
-- Course governance reviews
-- Course redesign projects
-- Portfolio-level Moodle analysis
+Batch mode additionally creates:
 
----
+-   combined_course_summary.csv
+-   batch_run_log.csv
 
-## Data Protection and Privacy
+## Dashboard
 
-Moodle backups may contain sensitive institutional information.
+The dashboard generator creates:
 
-Before using this tool ensure that:
+-   dashboard.html
 
-- You have permission to access the backup
-- You comply with institutional policies
-- Outputs are stored securely
-- Sensitive outputs are not committed to public repositories
-- Shared examples are anonymised where appropriate
+This is a standalone interactive HTML report that can be opened locally
+in any modern web browser.
 
----
+------------------------------------------------------------------------
 
-## Licence
+# Example Use Cases
+
+-   Moodle course auditing
+-   Quality assurance
+-   Curriculum review
+-   Learning design review
+-   Course migration
+-   Digital education analysis
+-   Governance
+-   Moodle Book inventories
+-   Portfolio analysis
+-   Interactive analytics dashboards
+
+------------------------------------------------------------------------
+
+# Data Protection
+
+Ensure you have permission to analyse Moodle backups and that outputs
+are stored securely. Avoid publishing backups or reports containing
+sensitive information.
+
+------------------------------------------------------------------------
+
+# Roadmap
+
+Planned future enhancements include:
+
+-   Portfolio dashboards
+-   Cross-course benchmarking
+-   Accessibility metadata analysis
+-   AI-assisted interpretation
+-   Moodle Book deep analysis
+-   Institutional benchmarking
+-   Integration with additional CloudPedagogy tools
+
+------------------------------------------------------------------------
+
+# Licence
 
 MIT License
 
----
+------------------------------------------------------------------------
 
-## Roadmap
+# Disclaimer
 
-Potential future enhancements include:
+CloudPedagogy Moodle Course Auditor provides factual reports derived
+from Moodle backup XML metadata.
 
-- Interactive HTML dashboards
-- Visual analytics
-- Moodle Book specific reporting
-- Accessibility metadata analysis
-- AI-assisted report interpretation
-- Portfolio-wide benchmarking
-- Integration with other CloudPedagogy tools
+Interactive dashboards visualise the same factual audit outputs and do
+not introduce pedagogic scores, quality ratings or compliance
+judgements.
 
----
-
-## Disclaimer
-
-CloudPedagogy Moodle Course Auditor provides factual reports derived from Moodle backup XML metadata.
-
-The tool does not replace academic judgement, institutional review processes, accessibility audits, data protection assessments, quality assurance procedures, or Moodle administration activities.
+The software supports institutional review processes but does not
+replace academic judgement, quality assurance procedures, accessibility
+audits or Moodle administration.
