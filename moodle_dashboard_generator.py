@@ -8,7 +8,8 @@ moodle_mbz_course_auditor.py.
 
 This script is intentionally a separate visualisation layer. It does not parse
 Moodle .mbz files and it does not change the audit data. It reads an existing
-audit output folder and creates dashboard.html.
+audit output folder and creates dashboard.html. It can optionally enrich the
+Moodle Book section with one Moodle access/non-access CSV.
 
 Example:
     python3 moodle_dashboard_generator.py moodle_audit_output
@@ -51,6 +52,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -83,6 +85,38 @@ AUDIT_FILES = {
 }
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
+
+
+# ============================================================================
+# OPTIONAL DATA INTEGRATION: MOODLE BOOK ACCESS / NON-ACCESS REPORT
+# ============================================================================
+# The dashboard works normally from the audit output files alone.
+#
+# If exactly one CSV is present in:
+#
+#   moodle_data_imports/
+#       content_access_distribution/
+#           books/
+#
+# the script will try to match each CSV row to the corresponding Moodle Book
+# in book_inventory.csv and add access, non-access and reach information.
+#
+# The audit output folder and moodle_data_imports folder should be siblings:
+#
+#   project/
+#   ├── moodle_audit_output/
+#   └── moodle_data_imports/
+#       └── content_access_distribution/
+#           └── books/
+#               └── any_filename.csv
+#
+# Missing, empty, ambiguous or incompatible optional data will never stop the
+# dashboard from being generated. The original audit-only Book chart is used.
+# ============================================================================
+BOOK_ACCESS_IMPORT_RELATIVE_PATH = Path(
+    "moodle_data_imports/content_access_distribution/books"
+)
+
 
 
 def read_csv_optional(folder: Path, filename: str) -> pd.DataFrame:
@@ -329,29 +363,697 @@ def make_section_breakdown_chart(data: Dict[str, Any]) -> Optional[str]:
     return fig_to_div(fig)
 
 
-def make_book_chart(data: Dict[str, Any]) -> Optional[str]:
-    books = data.get("book_inventory", pd.DataFrame())
-    if not has_columns(books, ["activity_name", "book_chapter_count_from_xml"]):
-        return None
-    df = books.copy()
-    df["book_chapter_count_from_xml"] = numeric_series(df, "book_chapter_count_from_xml")
-    df["xml_text_word_count_estimate"] = numeric_series(df, "xml_text_word_count_estimate")
-    df = df.sort_values("book_chapter_count_from_xml", ascending=False).head(25)
-    if df.empty or df["book_chapter_count_from_xml"].sum() == 0:
-        return None
-    df["activity_label"] = df["activity_name"].map(lambda x: shorten(x, 60))
-    fig = px.bar(
-        df.sort_values("book_chapter_count_from_xml", ascending=True),
-        x="book_chapter_count_from_xml",
-        y="activity_label",
-        orientation="h",
-        title="Top Moodle Books by chapter count",
-        labels={"book_chapter_count_from_xml": "Chapters", "activity_label": "Book"},
-        hover_data={"activity_name": True, "xml_text_word_count_estimate": True, "visible": True},
-    )
-    fig.update_layout(height=max(430, min(850, 28 * len(df) + 120)))
-    return fig_to_div(fig)
 
+# ============================================================================
+# OPTIONAL DATA INTEGRATION HELPERS: MOODLE BOOK ACCESS / NON-ACCESS REPORT
+# ============================================================================
+
+def normalise_heading(value: Any) -> str:
+    """Normalise a CSV heading so small naming differences can be tolerated."""
+    text = clean_label(value).strip().lower().replace("\u00a0", " ")
+    text = re.sub(r"[^a-z0-9%]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalise_book_title(value: Any) -> str:
+    """
+    Normalise a Moodle Book title for matching.
+
+    Meaningful suffixes such as '(scr)' are retained so similarly named Books
+    are not silently combined.
+    """
+    text = clean_label(value).strip().lower().replace("\u00a0", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip()
+
+
+def find_column(
+    df: pd.DataFrame,
+    exact_aliases: Iterable[str],
+    required_tokens: Optional[Iterable[str]] = None,
+    forbidden_tokens: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    """Find a column by exact aliases first, then by required/forbidden tokens."""
+    if df.empty:
+        return None
+
+    aliases = {normalise_heading(alias) for alias in exact_aliases}
+    headings = {column: normalise_heading(column) for column in df.columns}
+
+    for column, heading in headings.items():
+        if heading in aliases:
+            return column
+
+    if required_tokens:
+        required = [normalise_heading(token) for token in required_tokens]
+        forbidden = [
+            normalise_heading(token) for token in (forbidden_tokens or [])
+        ]
+        for column, heading in headings.items():
+            if all(token in heading for token in required) and not any(
+                token in heading for token in forbidden
+            ):
+                return column
+
+    return None
+
+
+def read_optional_moodle_csv(path: Path) -> pd.DataFrame:
+    """Read a Moodle CSV while tolerating common encodings and delimiters."""
+    attempts = [
+        {"encoding": "utf-8-sig", "sep": None, "engine": "python"},
+        {"encoding": "utf-8", "sep": None, "engine": "python"},
+        {"encoding": "cp1252", "sep": None, "engine": "python"},
+    ]
+    last_error: Optional[Exception] = None
+
+    for options in attempts:
+        try:
+            return pd.read_csv(path, **options)
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Unable to read {path.name}: {last_error}")
+
+
+def locate_optional_book_access_csv(
+    audit_output_folder: Path,
+) -> Tuple[Optional[Path], List[str]]:
+    """
+    Locate one optional Books access CSV.
+
+    The import folder is resolved from the parent of the audit output folder.
+    """
+    messages: List[str] = []
+    project_root = audit_output_folder.resolve().parent
+    import_folder = project_root / BOOK_ACCESS_IMPORT_RELATIVE_PATH
+
+    if not import_folder.exists():
+        return None, messages
+
+    csv_files = sorted(
+        path
+        for path in import_folder.glob("*.csv")
+        if path.is_file() and path.stat().st_size > 0
+    )
+
+    if not csv_files:
+        return None, messages
+
+    if len(csv_files) > 1:
+        messages.append(
+            "More than one CSV was found in "
+            f"{import_folder}. Optional Book access integration was skipped. "
+            "Leave exactly one CSV in this folder."
+        )
+        return None, messages
+
+    return csv_files[0], messages
+
+
+def standardise_book_access_report(
+    raw: pd.DataFrame,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Convert the optional Moodle export to a standard Book-level schema.
+
+    The expected logical fields are:
+      - Book title
+      - Access count
+      - Non-access count
+      - Reach percentage (optional because it can be calculated)
+
+    Moodle report column names vary, so aliases are deliberately flexible.
+    """
+    messages: List[str] = []
+    if raw.empty:
+        return pd.DataFrame(), messages
+
+    title_column = find_column(
+        raw,
+        [
+            "book",
+            "book name",
+            "activity",
+            "activity name",
+            "content",
+            "contents",
+            "content name",
+            "resource",
+            "resource name",
+            "name",
+            "title",
+        ],
+    )
+
+    no_access_column = find_column(
+        raw,
+        [
+            "no access",
+            "not accessed",
+            "non access",
+            "non-access",
+            "without access",
+            "students without access",
+            "users without access",
+            "number not accessed",
+        ],
+        required_tokens=["access"],
+        forbidden_tokens=[],
+    )
+    if no_access_column is not None:
+        heading = normalise_heading(no_access_column)
+        if not any(token in heading for token in ["no", "not", "non", "without"]):
+            no_access_column = None
+
+    access_column = find_column(
+        raw,
+        [
+            "access",
+            "accessed",
+            "with access",
+            "students with access",
+            "users with access",
+            "number accessed",
+            "access count",
+        ],
+        required_tokens=["access"],
+        forbidden_tokens=["no", "not", "non", "without", "%", "percent", "percentage"],
+    )
+
+    reach_column = find_column(
+        raw,
+        [
+            "reach",
+            "reach %",
+            "access %",
+            "access percentage",
+            "percentage accessed",
+            "percent accessed",
+        ],
+    )
+
+    if title_column is None:
+        messages.append(
+            "The optional Books CSV was found, but no Book-title column could "
+            "be identified. Audit-only mode was used."
+        )
+        return pd.DataFrame(), messages
+
+    if access_column is None and no_access_column is None and reach_column is None:
+        messages.append(
+            "The optional Books CSV was found, but no access, non-access or "
+            "reach columns could be identified. Audit-only mode was used."
+        )
+        return pd.DataFrame(), messages
+
+    result = pd.DataFrame()
+    result["access_book_title"] = raw[title_column].map(clean_label).str.strip()
+    result["normalised_book_title"] = result["access_book_title"].map(
+        normalise_book_title
+    )
+
+    def parse_number(column: Optional[str]) -> pd.Series:
+        if column is None:
+            return pd.Series([pd.NA] * len(raw), index=raw.index, dtype="Float64")
+        cleaned = (
+            raw[column]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace("%", "", regex=False)
+            .str.strip()
+        )
+        return pd.to_numeric(cleaned, errors="coerce").astype("Float64")
+
+    result["access_count"] = parse_number(access_column)
+    result["no_access_count"] = parse_number(no_access_column)
+    result["reach_percent"] = parse_number(reach_column)
+
+    denominator = result["access_count"] + result["no_access_count"]
+    calculated_reach = (
+        result["access_count"] / denominator.where(denominator > 0)
+    ) * 100
+    result["reach_percent"] = result["reach_percent"].fillna(calculated_reach)
+
+    result = result[result["normalised_book_title"] != ""].copy()
+
+    duplicate_mask = result["normalised_book_title"].duplicated(keep=False)
+    if duplicate_mask.any():
+        duplicate_names = (
+            result.loc[duplicate_mask, "access_book_title"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        messages.append(
+            "Duplicate Book titles were found in the optional CSV and excluded "
+            "from automatic matching: "
+            + "; ".join(duplicate_names[:10])
+        )
+        result = result.loc[~duplicate_mask].copy()
+
+    return result, messages
+
+
+def merge_book_access_data(
+    books: pd.DataFrame,
+    access_data: pd.DataFrame,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Left-join optional access data onto the audit Book inventory."""
+    messages: List[str] = []
+    merged_source = books.copy()
+    merged_source["normalised_book_title"] = merged_source["activity_name"].map(
+        normalise_book_title
+    )
+
+    if access_data.empty:
+        merged_source["access_book_title"] = pd.NA
+        merged_source["access_count"] = pd.NA
+        merged_source["no_access_count"] = pd.NA
+        merged_source["reach_percent"] = pd.NA
+        return merged_source, messages
+
+    duplicate_audit_mask = merged_source["normalised_book_title"].duplicated(
+        keep=False
+    )
+    if duplicate_audit_mask.any():
+        duplicate_keys = set(
+            merged_source.loc[
+                duplicate_audit_mask, "normalised_book_title"
+            ].tolist()
+        )
+        duplicate_names = (
+            merged_source.loc[duplicate_audit_mask, "activity_name"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        messages.append(
+            "Some audit Books share the same normalised title and were excluded "
+            "from automatic access matching: "
+            + "; ".join(duplicate_names[:10])
+        )
+        access_data = access_data[
+            ~access_data["normalised_book_title"].isin(duplicate_keys)
+        ].copy()
+
+    merged = merged_source.merge(
+        access_data[
+            [
+                "normalised_book_title",
+                "access_book_title",
+                "access_count",
+                "no_access_count",
+                "reach_percent",
+            ]
+        ],
+        on="normalised_book_title",
+        how="left",
+        validate="many_to_one",
+    )
+
+    matched_count = int(merged["access_book_title"].notna().sum())
+    unmatched_count = int(
+        (~access_data["normalised_book_title"].isin(
+            set(merged_source["normalised_book_title"])
+        )).sum()
+    )
+
+    if matched_count == 0:
+        messages.append(
+            "The optional Books CSV was loaded, but no Book titles matched "
+            "book_inventory.csv. Audit-only values are still displayed."
+        )
+    if unmatched_count:
+        messages.append(
+            f"{unmatched_count} row(s) in the optional Books CSV did not match "
+            "a Book in book_inventory.csv."
+        )
+
+    return merged, messages
+
+
+def integration_messages_html(messages: Iterable[str]) -> str:
+    """Render optional integration messages without treating them as failures."""
+    items = [message for message in messages if message]
+    if not items:
+        return ""
+    return (
+        '<div class="integration-note">'
+        "<strong>Optional Book data integration</strong>"
+        "<ul>"
+        + "".join(f"<li>{safe_html(message)}</li>" for message in items)
+        + "</ul></div>"
+    )
+
+def make_book_chart(
+    data: Dict[str, Any],
+    audit_output_folder: Path,
+) -> Tuple[Optional[str], List[str]]:
+    """
+    Build the Moodle Book visualisation.
+
+    Audit-only mode:
+        Shows the original horizontal page-count chart.
+
+    Optional access-data mode:
+        Shows four parallel horizontal charts using exactly the same Book order:
+          1. Moodle Book pages
+          2. Students with access
+          3. Students with no access
+          4. Reach percentage
+
+    Hidden Books are excluded from these charts but remain available in the
+    later Hidden and duplicate content section. The access data is never
+    overlaid on the page bars, and no duplicate summary table is produced.
+    """
+    messages: List[str] = []
+    books = data.get("book_inventory", pd.DataFrame())
+    if books.empty or "activity_name" not in books.columns:
+        return None, messages
+
+    if "book_page_count_from_xml" in books.columns:
+        page_count_column = "book_page_count_from_xml"
+    elif "book_chapter_count_from_xml" in books.columns:
+        page_count_column = "book_chapter_count_from_xml"
+    else:
+        return None, messages
+
+    df = books.copy()
+    df["moodle_book_page_count"] = numeric_series(df, page_count_column)
+    df["xml_text_word_count_estimate"] = numeric_series(
+        df, "xml_text_word_count_estimate"
+    )
+
+    if "book_top_level_chapter_count_from_xml" in df.columns:
+        df["book_top_level_chapter_count_from_xml"] = numeric_series(
+            df, "book_top_level_chapter_count_from_xml"
+        )
+
+    if "book_subchapter_count_from_xml" in df.columns:
+        df["book_subchapter_count_from_xml"] = numeric_series(
+            df, "book_subchapter_count_from_xml"
+        )
+
+    # ========================================================================
+    # VISIBLE-BOOK FILTER FOR THE MAIN MOODLE BOOK VISUALISATION
+    # ========================================================================
+    # Hidden Books are excluded only from this local visualisation dataset.
+    # They remain available later in the dashboard through:
+    #   - hidden_content_summary.csv
+    #   - hidden_activity_inventory.csv
+    #   - the overall Hidden activities metric
+    #
+    # Moodle CSV values may appear as 0, 0.0, False, "false", "hidden", etc.,
+    # so both numeric and text representations are handled.
+    # ========================================================================
+    hidden_book_count = 0
+
+    if "visible" in df.columns:
+        visible_numeric = pd.to_numeric(df["visible"], errors="coerce")
+        visible_text = (
+            df["visible"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        hidden_mask = visible_numeric.eq(0) | visible_text.isin(
+            ["0", "0.0", "false", "no", "hidden"]
+        )
+
+        hidden_book_count = int(hidden_mask.sum())
+        df = df.loc[~hidden_mask].copy()
+
+        if hidden_book_count:
+            messages.append(
+                f"{hidden_book_count} hidden Moodle Book"
+                f"{'s were' if hidden_book_count != 1 else ' was'} excluded "
+                "from the Moodle Book footprint and access charts. "
+                "Hidden Books remain available in the later Hidden and "
+                "duplicate content section."
+            )
+
+    # ========================================================================
+    # OPTIONAL DATA INTEGRATION: LOAD AND MATCH THE BOOKS ACCESS CSV
+    # ========================================================================
+    optional_csv, locate_messages = locate_optional_book_access_csv(
+        audit_output_folder
+    )
+    messages.extend(locate_messages)
+
+    access_data = pd.DataFrame()
+    if optional_csv is not None:
+        try:
+            raw_access = read_optional_moodle_csv(optional_csv)
+            access_data, standardise_messages = standardise_book_access_report(
+                raw_access
+            )
+            messages.extend(standardise_messages)
+        except Exception as exc:
+            messages.append(
+                f"Could not load optional Books CSV {optional_csv.name}: {exc}. "
+                "Audit-only mode was used."
+            )
+
+    df, merge_messages = merge_book_access_data(df, access_data)
+    messages.extend(merge_messages)
+
+    # Keep one stable ordering for every parallel chart.
+    df = df.sort_values("moodle_book_page_count", ascending=False).head(25)
+    if df.empty or df["moodle_book_page_count"].sum() == 0:
+        return None, messages
+
+    df["activity_label"] = df["activity_name"].map(
+        lambda value: shorten(value, 58)
+    )
+    ordered = df.sort_values("moodle_book_page_count", ascending=True).copy()
+    has_access_data = ordered["access_book_title"].notna().any()
+
+    # ------------------------------------------------------------------------
+    # AUDIT-ONLY MODE: preserve the original horizontal Book page chart.
+    # ------------------------------------------------------------------------
+    if not has_access_data:
+        hover_data: Dict[str, Any] = {
+            "activity_name": True,
+            "moodle_book_page_count": True,
+            "xml_text_word_count_estimate": True,
+            "visible": True,
+            "activity_label": False,
+        }
+
+        if "book_top_level_chapter_count_from_xml" in ordered.columns:
+            hover_data["book_top_level_chapter_count_from_xml"] = True
+
+        if "book_subchapter_count_from_xml" in ordered.columns:
+            hover_data["book_subchapter_count_from_xml"] = True
+
+        fig = px.bar(
+            ordered,
+            x="moodle_book_page_count",
+            y="activity_label",
+            orientation="h",
+            title="Top Moodle Books by page count",
+            labels={
+                "moodle_book_page_count": "Moodle Book pages",
+                "activity_label": "Book",
+                "xml_text_word_count_estimate": "Estimated XML words",
+                "book_top_level_chapter_count_from_xml": "Top-level chapters",
+                "book_subchapter_count_from_xml": "Subchapters",
+                "visible": "Visible",
+            },
+            hover_data=hover_data,
+            text="moodle_book_page_count",
+        )
+        fig.update_traces(
+            texttemplate="%{text:,.0f} pages",
+            textposition="outside",
+            cliponaxis=False,
+        )
+        fig.update_layout(
+            height=max(460, min(900, 34 * len(ordered) + 150)),
+            xaxis_title="Moodle Book pages",
+            yaxis_title="Book",
+        )
+        return fig_to_div(fig), messages
+
+    # ------------------------------------------------------------------------
+    # OPTIONAL ENRICHED MODE: four aligned parallel horizontal charts.
+    # ------------------------------------------------------------------------
+    matched = ordered[ordered["access_book_title"].notna()].copy()
+
+    for column in ["access_count", "no_access_count", "reach_percent"]:
+        matched[column] = pd.to_numeric(matched[column], errors="coerce")
+
+    # Retain the audit ordering while excluding unmatched Books from the access
+    # panels. Unmatched Books remain visible in the pages panel with blanks in
+    # the other panels.
+    ordered["access_count"] = pd.to_numeric(
+        ordered["access_count"], errors="coerce"
+    )
+    ordered["no_access_count"] = pd.to_numeric(
+        ordered["no_access_count"], errors="coerce"
+    )
+    ordered["reach_percent"] = pd.to_numeric(
+        ordered["reach_percent"], errors="coerce"
+    )
+
+    subplot_titles = (
+        "Book pages",
+        "Students with access",
+        "Students with no access",
+        "Reach",
+    )
+    fig = make_subplots(
+        rows=1,
+        cols=4,
+        shared_yaxes=True,
+        horizontal_spacing=0.055,
+        column_widths=[0.27, 0.25, 0.25, 0.23],
+        subplot_titles=subplot_titles,
+    )
+
+    page_customdata = ordered[
+        ["activity_name", "xml_text_word_count_estimate", "visible"]
+    ].where(
+        pd.notna(
+            ordered[["activity_name", "xml_text_word_count_estimate", "visible"]]
+        ),
+        None,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["moodle_book_page_count"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="Pages",
+            text=ordered["moodle_book_page_count"],
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=page_customdata.to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Moodle Book pages: %{x:,.0f}<br>"
+                "Estimated XML words: %{customdata[1]:,.0f}<br>"
+                "Visible: %{customdata[2]}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["access_count"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="Access",
+            text=ordered["access_count"],
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["activity_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Students with access: %{x:,.0f}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["no_access_count"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="No access",
+            text=ordered["no_access_count"],
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["activity_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Students with no access: %{x:,.0f}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=3,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["reach_percent"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="Reach",
+            text=ordered["reach_percent"],
+            texttemplate="%{text:.1f}%",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["activity_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Reach: %{x:.1f}%"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=4,
+    )
+
+    fig.update_xaxes(title_text="Pages", row=1, col=1, rangemode="tozero")
+    fig.update_xaxes(title_text="Students", row=1, col=2, rangemode="tozero")
+    fig.update_xaxes(title_text="Students", row=1, col=3, rangemode="tozero")
+    fig.update_xaxes(
+        title_text="Percent",
+        row=1,
+        col=4,
+        range=[0, 100],
+        ticksuffix="%",
+    )
+
+    # Show Book labels only on the first panel. Shared y-axes keep every row
+    # exactly aligned across all four visualisations.
+    fig.update_yaxes(
+        title_text="Book",
+        showticklabels=True,
+        automargin=True,
+        row=1,
+        col=1,
+    )
+    for col in (2, 3, 4):
+        fig.update_yaxes(showticklabels=False, row=1, col=col)
+
+    fig.update_layout(
+        title="Moodle Book footprint and student access",
+        height=max(500, min(980, 38 * len(ordered) + 180)),
+        margin=dict(l=290, r=45, t=90, b=65),
+        bargap=0.28,
+    )
+
+    if optional_csv is not None:
+        matched_count = int(ordered["access_book_title"].notna().sum())
+        messages.insert(
+            0,
+            f"Loaded {optional_csv.name} and matched access data to "
+            f"{matched_count} of {len(ordered)} displayed Moodle Books."
+        )
+
+    return fig_to_div(fig), messages
 
 def make_external_domain_chart(data: Dict[str, Any]) -> Optional[str]:
     domains = data.get("external_domain_inventory", pd.DataFrame())
@@ -596,7 +1298,7 @@ def make_hidden_activity_table(data: Dict[str, Any], limit: int = 25) -> Optiona
 
 def make_data_quality_notes(data: Dict[str, Any]) -> str:
     notes = [
-        "This dashboard uses Moodle backup XML metadata only.",
+        "Core dashboard measures use Moodle backup XML metadata. Optional Moodle report data is used only when explicitly detected.",
         "Uploaded binary file contents are not opened or scanned.",
         "Counts for links, iframes, image tags and word estimates refer only to HTML-like content stored directly inside XML fields.",
         "No pedagogic judgement, quality score, risk score or severity score is generated.",
@@ -631,11 +1333,40 @@ def build_dashboard_html(input_folder: Path, data: Dict[str, Any]) -> str:
     if section_breakdown_chart:
         panels.append(panel("Section activity mix", section_breakdown_chart, "Stacked view of activity types per section where breakdown columns are present."))
 
-    book_chart = make_book_chart(data)
+    # ========================================================================
+    # OPTIONAL DATA INTEGRATION: MOODLE BOOK ACCESS / NON-ACCESS REPORT
+    # ========================================================================
+    # The normal audit-only Book chart is always available.
+    # Optional access data is added only when one compatible CSV is detected.
+    # ========================================================================
+    book_chart, book_integration_messages = make_book_chart(
+        data,
+        input_folder,
+    )
     if book_chart:
-        panels.append(panel("Moodle Book footprint", book_chart, "Only shown when book_inventory.csv contains Moodle Book records."))
+        book_body = book_chart
+        book_body += integration_messages_html(book_integration_messages)
+
+        panels.append(
+            panel(
+                "Moodle Book footprint",
+                book_body,
+                "Visible Moodle Books only are shown here. Moodle Book pages "
+                "include both top-level chapters and subchapters. When the optional "
+                "Books access CSV is available, four parallel horizontal charts use "
+                "the same Book order: pages, access, non-access and reach. Hidden "
+                "Books remain available in the later Hidden and duplicate content "
+                "section. Older audit outputs remain supported through "
+                "book_chapter_count_from_xml.",
+            )
+        )
     else:
-        panels.append(empty_panel("Moodle Book footprint", "No Moodle Book inventory detected for this course."))
+        panels.append(
+            empty_panel(
+                "Moodle Book footprint",
+                "No Moodle Book inventory detected for this course.",
+            )
+        )
 
     external_domain_chart = make_external_domain_chart(data)
     external_dependency_chart = make_external_dependency_chart(data)
@@ -767,6 +1498,18 @@ def build_dashboard_html(input_folder: Path, data: Dict[str, Any]) -> str:
       padding: 18px;
       border-radius: 12px;
       background: #fafbfe;
+    }}
+    .integration-note {{
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: #f4f7ff;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }}
+    .integration-note ul {{
+      margin-top: 6px;
     }}
     .table-wrap {{
       overflow-x: auto;
