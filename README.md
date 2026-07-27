@@ -1,6 +1,6 @@
 # CloudPedagogy Moodle Course Auditor
 
-A local-first Python toolkit for auditing Moodle course backup files (`.mbz`) and turning the resulting data into structured reports and an interactive HTML dashboard.
+A local-first Python toolkit for auditing complete Moodle course backups and turning the resulting metadata into structured reports, reusable data files and an interactive HTML dashboard.
 
 The platform supports evidence-informed course review, quality assurance, migration planning, curriculum review, content inventories, digital education analysis and governance. It works without access to a live Moodle site.
 
@@ -11,12 +11,12 @@ The project has two complementary components:
 1. **Moodle Course Auditor**
    - Extracts factual metadata from Moodle backup XML.
    - Produces Markdown, text, CSV and JSON outputs.
-   - Creates inventories of course structure, activities, Books, files, questions, hidden content and external dependencies.
+   - Creates inventories of course structure, activities, Moodle Books, files, questions, hidden content and external dependencies.
 2. **Interactive Dashboard Generator**
    - Reads the structured audit outputs.
    - Generates a standalone interactive Plotly dashboard (`dashboard.html`).
 
-The auditor is deliberately conservative: it reports what can be supported by the available source data and does not assign pedagogic quality, accessibility, compliance or risk scores.
+The auditor is deliberately conservative. It reports what can be supported by the backup metadata and does not assign pedagogic-quality, accessibility, compliance or risk scores.
 
 ---
 
@@ -58,14 +58,14 @@ The dashboard adapts to the audit data available. For example, a course without 
 
 ### Moodle course backup
 
-The auditor accepts:
+The auditor accepts Moodle backup archives in the following formats:
 
 - Moodle `.mbz`
 - ZIP
 - TAR
 - TAR.GZ
 
-The backup should include the course activities, resources and content required for the audit. The dashboard is generated from the auditor's structured outputs; it does not require a separate connection to Moodle.
+The backup should include the course activities, resources and content required for the audit. The dashboard is generated from the auditor's structured outputs and does not require a connection to a live Moodle site.
 
 ---
 
@@ -77,7 +77,7 @@ Include:
 - Question bank
 - Content
 
-For backups used outside their original Moodle environment, normally exclude unless specifically required:
+For backups processed outside their original Moodle environment, normally exclude the following unless they are specifically required and you are authorised to process them:
 
 - Enrolled users
 - User files
@@ -85,7 +85,7 @@ For backups used outside their original Moodle environment, normally exclude unl
 - Grades
 - Other personally identifiable information
 
-Always follow your institution's data-protection and information-governance requirements.
+Use the minimum data required for the audit and follow your institution's data-protection, retention and information-governance requirements.
 
 ---
 
@@ -187,6 +187,14 @@ questions.xml
 
 ---
 
+## Requirements
+
+- Python 3.10 or later
+- `pandas>=2.0`
+- `plotly>=6.0`
+
+The core XML auditor primarily uses the Python standard library. Dashboard generation requires `pandas` and `plotly`.
+
 ## Installation
 
 ```bash
@@ -196,11 +204,25 @@ cd cloudpedagogy-moodle-course-auditor
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install pandas plotly
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
+Verify that the virtual environment and dependencies are available:
 
-The core auditor uses the Python standard library. Dashboard generation requires `pandas` and `plotly`.
+```bash
+which python
+python --version
+python -c "import pandas, plotly; print('Dependencies installed successfully')"
+```
+
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+After activation, use `python` and `python -m pip` consistently so that installation and execution use the same interpreter.
 
 ---
 
@@ -209,28 +231,75 @@ The core auditor uses the Python standard library. Dashboard generation requires
 ### Audit a Moodle backup
 
 ```bash
-python3 moodle_mbz_course_auditor.py course.mbz
+python moodle_mbz_course_auditor.py course.mbz
+```
+
+To specify an output directory:
+
+```bash
+python moodle_mbz_course_auditor.py course.mbz \
+  --output output/course_audit
 ```
 
 ### Generate an interactive dashboard
 
 ```bash
-python3 moodle_dashboard_generator.py moodle_audit_output
+python moodle_dashboard_generator.py output/course_audit
 ```
 
 You can also pass an absolute or relative path to the audit output directory:
 
 ```bash
-python3 moodle_dashboard_generator.py /path/to/moodle_audit_output
+python moodle_dashboard_generator.py /path/to/course_audit
 ```
 
-Open the generated `dashboard.html` in a modern web browser.
+By default, the generator writes `dashboard.html` into the supplied audit-output directory. Open the file in a modern web browser:
+
+```bash
+open output/course_audit/dashboard.html
+```
+
+On platforms without the macOS `open` command, open `dashboard.html` from the file manager or browser.
+
+Check the command-line interface supported by the installed version before using additional options:
+
+```bash
+python moodle_mbz_course_auditor.py --help
+python moodle_dashboard_generator.py --help
+```
+
+The help output is authoritative for the version of the scripts you are running.
+
+---
+
+## Typical workflow
+
+```text
+Moodle course backup
+        │
+        ▼
+Run Moodle course auditor
+        │
+        ▼
+Review Markdown, text, CSV and JSON outputs
+        │
+        ▼
+Run dashboard generator
+        │
+        ▼
+Review dashboard with the course or programme team
+        │
+        ▼
+Agree any investigation, clean-up, migration or redesign work
+```
+
+The source backup is read but not modified.
 
 ---
 
 ## Outputs
 
-The exact set of files may vary according to the course data and processing mode.
+The exact set of files may vary according to the course data, auditor version and processing mode.
 
 ### Auditor outputs
 
@@ -264,7 +333,62 @@ Batch processing additionally creates:
 
 - `dashboard.html`
 
-This is a standalone interactive report. It does not require a Python process or live Moodle connection after generation, although Plotly loading behaviour may depend on how the generator is configured.
+This is a standalone interactive report. It does not require a running Python process or a live Moodle connection after generation. Whether the report requires internet access depends on whether Plotly JavaScript is embedded, loaded locally or loaded from a content-delivery network. Use the dashboard generator's `--help` output to check the options available in your version.
+
+---
+
+## Re-running and comparing audits
+
+When a newer backup is received, retain the original backup and write the new results to a dated or versioned output directory if historical comparison is required:
+
+```text
+output/
+├── course_2025_26_audit/
+└── course_2026_27_audit/
+```
+
+Only compare outputs generated with compatible auditor and output-schema versions. A modification date indicates a recorded Moodle change; it does not prove that the underlying academic content changed on that date.
+
+---
+
+## Troubleshooting
+
+### `python: command not found`
+
+Confirm that the virtual environment is active:
+
+```bash
+source .venv/bin/activate
+which python
+```
+
+The reported path should end in `.venv/bin/python`.
+
+### `externally-managed-environment`
+
+This normally means `pip` is using a system- or Homebrew-managed Python rather than the project virtual environment. Do not use `--break-system-packages`. Create or reactivate a virtual environment, then install with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Missing `pandas` or `plotly`
+
+With the virtual environment active, run:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Dashboard not generated
+
+Confirm that the audit completed successfully and that `audit_data.json` and the expected CSV files exist in the audit-output directory. Then check:
+
+```bash
+python moodle_dashboard_generator.py --help
+```
+
+and rerun the generator using the audit-output directory as its input.
 
 ---
 
@@ -279,7 +403,7 @@ This is a standalone interactive report. It does not require a Python process or
 - Reviewing the recorded age of Moodle activities.
 - Supporting conversations between academics, learning technologists, programme teams and governance groups.
 
-The outputs are evidence for professional review rather than substitutes for academic, learning-design, accessibility or quality-assurance judgement.
+The outputs provide evidence for professional review rather than substitutes for academic, learning-design, accessibility or quality-assurance judgement.
 
 ---
 
@@ -287,13 +411,13 @@ The outputs are evidence for professional review rather than substitutes for aca
 
 Moodle backups may contain sensitive or personal data. Only analyse data you are authorised to use, minimise the inclusion of personal data, store inputs and outputs securely, and do not publish raw backups or reports without checking their contents.
 
-The toolkit is designed to run locally, but local processing does not remove the need to follow institutional policies, retention schedules and applicable data-protection law.
+The toolkit is designed to run locally, but local processing does not remove the need to follow institutional policies, retention schedules and applicable data-protection law. Do not commit Moodle backups, extracted course data or potentially sensitive audit outputs to a public repository.
 
 ---
 
 ## Roadmap
 
-Potential future developments include:
+Possible future developments include:
 
 - Portfolio and cross-course dashboards
 - Cross-course benchmarking

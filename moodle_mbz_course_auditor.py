@@ -3,7 +3,7 @@
 Moodle MBZ XML Metadata Auditor
 ===============================
 
-Version: 1.5
+Version: 2.0
 
 Audits Moodle course backup files (.mbz) using XML metadata only.
 
@@ -78,6 +78,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse
 
+TOOL_VERSION = "2.0.0"
+SCHEMA_NAME = "cloudpedagogy-moodle-audit"
+SCHEMA_VERSION = "1.0"
+DEFAULT_MAX_ARCHIVE_MEMBERS = 200_000
+DEFAULT_MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
+
 
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 IFRAME_RE = re.compile(r"<iframe\b[^>]*>", re.IGNORECASE)
@@ -143,6 +149,18 @@ def parse_datetime_from_iso(value: str) -> Optional[dt.datetime]:
         return None
 
 
+def parse_as_of(value: Optional[str]) -> dt.datetime:
+    if not value:
+        return dt.datetime.now()
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--as-of must be an ISO date or datetime, for example 2026-07-27 or 2026-07-27T12:00:00."
+        ) from exc
+    return parsed
+
+
 def strip_html(raw: str) -> str:
     if not raw:
         return ""
@@ -159,10 +177,16 @@ def count_words_from_html(raw: str) -> int:
     return len(re.findall(r"\b\w+\b", text))
 
 
-def parse_xml(path: Path) -> Optional[ET.Element]:
+def parse_xml(path: Path, issues: Optional[List[Dict[str, str]]] = None) -> Optional[ET.Element]:
     try:
         return ET.parse(path).getroot()
-    except Exception:
+    except (ET.ParseError, OSError) as exc:
+        if issues is not None:
+            issues.append({
+                "level": "warning",
+                "source": str(path),
+                "message": f"XML could not be read: {exc}",
+            })
         return None
 
 
@@ -179,23 +203,96 @@ def detect_archive_type(path: Path) -> str:
         return "unknown"
 
 
-def extract_mbz(mbz_path: Path, extract_dir: Path) -> str:
+def _safe_archive_destination(root: Path, member_name: str) -> Path:
+    """Resolve an archive member and reject absolute paths and path traversal."""
+    member_path = Path(member_name.replace("\\", "/"))
+    if member_path.is_absolute() or ".." in member_path.parts:
+        raise RuntimeError(f"Unsafe archive member path: {member_name!r}")
+    destination = (root / member_path).resolve()
+    root_resolved = root.resolve()
+    if destination != root_resolved and root_resolved not in destination.parents:
+        raise RuntimeError(f"Archive member escapes extraction folder: {member_name!r}")
+    return destination
+
+
+def _validate_archive_limits(member_count: int, total_size: int, max_members: int, max_bytes: int) -> None:
+    if member_count > max_members:
+        raise RuntimeError(
+            f"Archive contains {member_count:,} members; safety limit is {max_members:,}. "
+            "Use --max-archive-members to change the limit."
+        )
+    if total_size > max_bytes:
+        raise RuntimeError(
+            f"Archive expands to approximately {total_size / (1024 ** 3):.2f} GiB; "
+            f"safety limit is {max_bytes / (1024 ** 3):.2f} GiB. "
+            "Use --max-uncompressed-gb to change the limit."
+        )
+
+
+def _extract_validated_tar(archive: tarfile.TarFile, destination: Path, members: List[tarfile.TarInfo]) -> None:
+    """Use Python's data filter when available, with validation above as fallback."""
+    try:
+        archive.extractall(destination, members=members, filter="data")
+    except TypeError:  # Python < 3.12
+        archive.extractall(destination, members=members)
+
+
+def extract_mbz(
+    mbz_path: Path,
+    extract_dir: Path,
+    max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
+) -> str:
     archive_type = detect_archive_type(mbz_path)
 
     if archive_type == "zip":
         with zipfile.ZipFile(mbz_path, "r") as z:
+            members = z.infolist()
+            _validate_archive_limits(
+                len(members),
+                sum(max(0, member.file_size) for member in members),
+                max_members,
+                max_uncompressed_bytes,
+            )
+            for member in members:
+                _safe_archive_destination(extract_dir, member.filename)
+                unix_mode = (member.external_attr >> 16) & 0o170000
+                if unix_mode == 0o120000:
+                    raise RuntimeError(f"Symbolic links are not allowed in the archive: {member.filename!r}")
             z.extractall(extract_dir)
         return "zip"
 
     if archive_type == "tar":
         with tarfile.open(mbz_path, "r:*") as t:
-            t.extractall(extract_dir)
+            members = t.getmembers()
+            _validate_archive_limits(
+                len(members),
+                sum(max(0, member.size) for member in members if member.isfile()),
+                max_members,
+                max_uncompressed_bytes,
+            )
+            for member in members:
+                _safe_archive_destination(extract_dir, member.name)
+                if member.issym() or member.islnk() or member.isdev():
+                    raise RuntimeError(f"Links and device files are not allowed in the archive: {member.name!r}")
+            _extract_validated_tar(t, extract_dir, members)
         return "tar/tar.gz"
 
     if archive_type == "gzip":
         try:
             with tarfile.open(mbz_path, "r:gz") as t:
-                t.extractall(extract_dir)
+                members = t.getmembers()
+                _validate_archive_limits(
+                    len(members),
+                    sum(max(0, member.size) for member in members if member.isfile()),
+                    max_members,
+                    max_uncompressed_bytes,
+                )
+                for member in members:
+                    _safe_archive_destination(extract_dir, member.name)
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise RuntimeError(f"Links and device files are not allowed in the archive: {member.name!r}")
+                _extract_validated_tar(t, extract_dir, members)
             return "tar.gz"
         except Exception as exc:
             raise RuntimeError(
@@ -320,8 +417,19 @@ def age_band(last_modified: str, now: Optional[dt.datetime] = None) -> str:
     return "modified_more_than_5_years_ago"
 
 
-def audit_course(root_dir: Path) -> Dict[str, Any]:
+def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[str, Any]:
+    as_of = as_of or dt.datetime.now()
+    input_issues: List[Dict[str, str]] = []
     data: Dict[str, Any] = {
+        "schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "generator": {
+            "name": "moodle_mbz_course_auditor",
+            "version": TOOL_VERSION,
+            "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "activity_age_as_of": as_of.isoformat(timespec="seconds"),
+        },
         "audit_scope": {
             "scope": "Moodle backup XML metadata only",
             "binary_file_content_scanned": False,
@@ -350,11 +458,14 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         "questions": {},
         "xml_findings": [],
         "factual_observations": [],
+        "input_issues": input_issues,
         "summary": {},
     }
 
     course_xml = root_dir / "course" / "course.xml"
-    course_root = parse_xml(course_xml)
+    if not course_xml.exists():
+        input_issues.append({"level": "warning", "source": str(course_xml), "message": "course.xml is absent."})
+    course_root = parse_xml(course_xml, input_issues)
     if course_root is not None:
         course_node = course_root.find("course") if course_root.tag != "course" else course_root
         data["course"] = {
@@ -375,7 +486,7 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
 
     sections_dir = root_dir / "sections"
     for section_xml in sorted(sections_dir.glob("section_*/section.xml")) if sections_dir.exists() else []:
-        section_root = parse_xml(section_xml)
+        section_root = parse_xml(section_xml, input_issues)
         if section_root is None:
             continue
 
@@ -413,7 +524,7 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
             continue
 
         module_xml = activity_dir / "module.xml"
-        module_root = parse_xml(module_xml)
+        module_root = parse_xml(module_xml, input_issues)
         if module_root is None:
             continue
 
@@ -432,7 +543,7 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         raw_html_chunks: List[str] = []
 
         if specific_xml:
-            specific_root = parse_xml(specific_xml)
+            specific_root = parse_xml(specific_xml, input_issues)
             if specific_root is not None:
                 node = specific_root.find(modulename)
                 if node is None:
@@ -491,7 +602,7 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
             "xml_external_links_sample": "; ".join(xml_external_links[:10]),
             "last_modified_from_xml": last_modified,
             "modified_year_from_xml": year_from_iso(last_modified),
-            "activity_age_band": age_band(last_modified),
+            "activity_age_band": age_band(last_modified, now=as_of),
             "activity_xml_path": str(specific_xml.relative_to(root_dir)) if specific_xml else "",
             "module_xml_path": str(module_xml.relative_to(root_dir)),
         }
@@ -515,7 +626,9 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         data["section_activity_breakdown"].append(row)
 
     files_xml = root_dir / "files.xml"
-    files_root = parse_xml(files_xml)
+    if not files_xml.exists():
+        input_issues.append({"level": "warning", "source": str(files_xml), "message": "files.xml is absent."})
+    files_root = parse_xml(files_xml, input_issues)
     file_ext_counts = Counter()
     file_mimetype_counts = Counter()
     file_component_counts = Counter()
@@ -553,7 +666,7 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
             })
 
     questions_xml = root_dir / "questions.xml"
-    questions_root = parse_xml(questions_xml)
+    questions_root = parse_xml(questions_xml, input_issues)
     question_type_counts = Counter()
     if questions_root is not None:
         for q in questions_root.findall(".//question"):
@@ -818,22 +931,72 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
     return data
 
 
-def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
+CSV_MINIMUM_FIELDS: Dict[str, List[str]] = {
+    "sections.csv": ["section_number", "section_name", "activity_count_from_sequence"],
+    "activities.csv": ["activity_type"],
+    "section_activity_breakdown.csv": ["section_number"],
+    "book_inventory.csv": ["activity_name", "book_chapter_count_from_xml"],
+    "duplicate_activity_inventory.csv": ["activity_name", "occurrence_count"],
+    "hidden_content_summary.csv": ["activity_type", "hidden_activity_count"],
+    "hidden_activity_inventory.csv": [
+        "activity_name", "activity_type", "section_number", "section_name", "last_modified_from_xml"
+    ],
+    "external_dependency_inventory.csv": [
+        "activity_name", "xml_external_link_count", "xml_iframe_count",
+        "xml_webcal_link_count", "xml_panopto_link_count",
+    ],
+    "external_domain_inventory.csv": ["domain", "reference_count_in_xml"],
+    "file_extension_inventory.csv": ["extension", "file_count"],
+    "largest_files.csv": [
+        "filename_from_xml", "filesize_from_xml_mb", "extension_from_filename", "mimetype_from_xml"
+    ],
+    "modification_year_summary.csv": ["modified_year_from_xml", "activity_count"],
+    "activity_age_summary.csv": ["activity_age_band", "activity_count"],
+}
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write text completely before replacing the destination."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def write_json(path: Path, value: Any) -> None:
+    atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+
+
+def write_csv(path: Path, rows: List[Dict[str, Any]], minimum_fields: Optional[List[str]] = None) -> None:
+    minimum_fields = minimum_fields or CSV_MINIMUM_FIELDS.get(path.name, [])
+    discovered_fields = sorted({key for row in rows for key in row.keys()})
+    fieldnames = list(dict.fromkeys([*minimum_fields, *discovered_fields]))
+    if not fieldnames:
+        atomic_write_text(path, "")
         return
 
-    fieldnames = sorted({key for row in rows for key in row.keys()})
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        with temp_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def flatten_course_summary(data: Dict[str, Any], source_name: str, archive_type: str, output_folder: str = "") -> Dict[str, Any]:
     summary = data.get("summary", {})
     row = {
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "generator_version": TOOL_VERSION,
         "source_backup": source_name,
         "output_folder": output_folder,
         "archive_type": archive_type,
@@ -1097,7 +1260,7 @@ def write_text_report(path: Path, data: Dict[str, Any], source_name: str, archiv
     lines.append("Uploaded file contents are not opened or scanned.")
     lines.append("No quality score, risk score, severity score, or pedagogic rating is generated.")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, archive_type: str) -> None:
@@ -1348,20 +1511,37 @@ def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, ar
     lines.append("- CSV and JSON outputs retain explicit `_from_xml` field names for machine-readable clarity.")
     lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
-def process_single_mbz(mbz_path: Path, output_dir: Path, keep_extracted: bool = False) -> Dict[str, Any]:
+def process_single_mbz(
+    mbz_path: Path,
+    output_dir: Path,
+    keep_extracted: bool = False,
+    as_of: Optional[dt.datetime] = None,
+    max_archive_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
+) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         extract_dir = Path(tmp) / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
 
-        archive_type = extract_mbz(mbz_path, extract_dir)
-        data = audit_course(extract_dir)
+        archive_type = extract_mbz(
+            mbz_path,
+            extract_dir,
+            max_members=max_archive_members,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+        )
+        data = audit_course(extract_dir, as_of=as_of)
+        data["source"] = {
+            "backup_filename": mbz_path.name,
+            "archive_type": archive_type,
+            "backup_size_bytes": mbz_path.stat().st_size,
+        }
 
-        (output_dir / "audit_data.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_json(output_dir / "audit_data.json", data)
         write_csv(output_dir / "sections.csv", data["sections"])
         write_csv(output_dir / "activities.csv", data["activities"])
         write_csv(output_dir / "files.csv", data["files"])
@@ -1391,7 +1571,15 @@ def process_single_mbz(mbz_path: Path, output_dir: Path, keep_extracted: bool = 
     return summary_row
 
 
-def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_extracted: bool = False) -> None:
+def run_batch(
+    input_dir: Path,
+    output_dir: Path,
+    recursive: bool = False,
+    keep_extracted: bool = False,
+    as_of: Optional[dt.datetime] = None,
+    max_archive_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
+) -> int:
     mbz_files = find_mbz_files(input_dir, recursive=recursive)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1414,7 +1602,14 @@ def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_e
         print(f"[{index}/{len(mbz_files)}] Auditing XML metadata: {mbz_path.name}")
 
         try:
-            summary_row = process_single_mbz(mbz_path, course_output_dir, keep_extracted=keep_extracted)
+            summary_row = process_single_mbz(
+                mbz_path,
+                course_output_dir,
+                keep_extracted=keep_extracted,
+                as_of=as_of,
+                max_archive_members=max_archive_members,
+                max_uncompressed_bytes=max_uncompressed_bytes,
+            )
             combined_rows.append(summary_row)
             log_rows.append({
                 "source_backup": mbz_path.name,
@@ -1441,7 +1636,9 @@ def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_e
     print(f"- {output_dir / 'combined_course_summary.csv'}")
     print(f"- {output_dir / 'batch_run_log.csv'}")
     print(f"Courses processed successfully: {len(combined_rows)}")
-    print(f"Courses failed: {sum(1 for row in log_rows if row['status'] == 'failed')}")
+    failed_count = sum(1 for row in log_rows if row["status"] == "failed")
+    print(f"Courses failed: {failed_count}")
+    return failed_count
 
 
 def main() -> None:
@@ -1454,10 +1651,32 @@ def main() -> None:
     parser.add_argument("--batch", action="store_true", help="Process all .mbz files in the input folder")
     parser.add_argument("--recursive", action="store_true", help="In batch mode, search subfolders recursively for .mbz files")
     parser.add_argument("--keep-extracted", action="store_true", help="Keep extracted backup files in each output folder")
+    parser.add_argument(
+        "--as-of",
+        type=parse_as_of,
+        help="ISO date/datetime used for activity-age bands. Defaults to the current local time.",
+    )
+    parser.add_argument(
+        "--max-archive-members",
+        type=int,
+        default=DEFAULT_MAX_ARCHIVE_MEMBERS,
+        help=f"Maximum archive members allowed during extraction (default: {DEFAULT_MAX_ARCHIVE_MEMBERS:,}).",
+    )
+    parser.add_argument(
+        "--max-uncompressed-gb",
+        type=float,
+        default=DEFAULT_MAX_UNCOMPRESSED_BYTES / (1024 ** 3),
+        help="Maximum estimated uncompressed archive size in GiB (default: 20).",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
+    if args.max_archive_members <= 0:
+        parser.error("--max-archive-members must be greater than zero.")
+    if args.max_uncompressed_gb <= 0:
+        parser.error("--max-uncompressed-gb must be greater than zero.")
+    max_uncompressed_bytes = int(args.max_uncompressed_gb * (1024 ** 3))
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input not found: {input_path}")
@@ -1465,7 +1684,17 @@ def main() -> None:
     if args.batch:
         if not input_path.is_dir():
             raise ValueError("--batch requires input to be a folder containing .mbz files.")
-        run_batch(input_path, output_dir, recursive=args.recursive, keep_extracted=args.keep_extracted)
+        failed_count = run_batch(
+            input_path,
+            output_dir,
+            recursive=args.recursive,
+            keep_extracted=args.keep_extracted,
+            as_of=args.as_of,
+            max_archive_members=args.max_archive_members,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+        )
+        if failed_count:
+            raise SystemExit(1)
         return
 
     if input_path.is_dir():
@@ -1474,7 +1703,14 @@ def main() -> None:
     if input_path.suffix.lower() != ".mbz":
         raise ValueError("Input file must have a .mbz extension.")
 
-    process_single_mbz(input_path, output_dir, keep_extracted=args.keep_extracted)
+    process_single_mbz(
+        input_path,
+        output_dir,
+        keep_extracted=args.keep_extracted,
+        as_of=args.as_of,
+        max_archive_members=args.max_archive_members,
+        max_uncompressed_bytes=max_uncompressed_bytes,
+    )
 
     print(f"XML metadata audit complete: {output_dir}")
     print(f"- {output_dir / 'audit_report.md'}")
