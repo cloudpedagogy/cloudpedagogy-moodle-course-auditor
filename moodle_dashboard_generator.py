@@ -8,7 +8,8 @@ moodle_mbz_course_auditor.py.
 
 This script is intentionally a separate visualisation layer. It does not parse
 Moodle .mbz files and it does not change the audit data. It reads an existing
-audit output folder and creates dashboard.html.
+audit output folder and creates dashboard.html. It can optionally enrich the
+Moodle Book section with one Moodle access/non-access CSV.
 
 Example:
     python3 moodle_dashboard_generator.py moodle_audit_output
@@ -21,6 +22,8 @@ Expected input:
     A folder containing some or all of the auditor outputs, for example:
     - audit_data.json
     - course_summary.csv
+    - course_characteristics.csv
+    - course_footprint.csv
     - sections.csv
     - activities.csv
     - book_inventory.csv
@@ -33,15 +36,18 @@ Expected input:
     - hidden_content_summary.csv
     - hidden_activity_inventory.csv
     - duplicate_activity_inventory.csv
+    - content_inventory.csv
+    - content_category_summary.csv
+    - hosting_summary.csv
+    - video_inventory.csv
+    - external_media_inventory.csv
 
 Design principles:
     - Fixed dashboard framework.
     - Optional panels: missing or empty files are skipped gracefully.
     - Unknown/new Moodle activity types are handled dynamically.
-    - Output is a genuinely self-contained HTML file by default.
-    - CDN and local Plotly JavaScript modes are also available.
-    - Input problems are reported in the dashboard instead of being silently
-      presented as an absence of Moodle data.
+    - Media/content categories, providers, sections and activity types are data-driven.
+    - Output is a standalone HTML file using Plotly from CDN by default.
 
 Dependencies:
     pip install pandas plotly
@@ -52,7 +58,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import shutil
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -60,12 +66,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.io import to_html
-from plotly.offline import get_plotlyjs
+from plotly.subplots import make_subplots
 
 
 AUDIT_FILES = {
     "audit_data": "audit_data.json",
     "course_summary": "course_summary.csv",
+    "course_characteristics": "course_characteristics.csv",
+    "course_footprint": "course_footprint.csv",
     "sections": "sections.csv",
     "activities": "activities.csv",
     "section_activity_breakdown": "section_activity_breakdown.csv",
@@ -79,184 +87,89 @@ AUDIT_FILES = {
     "largest_files": "largest_files.csv",
     "modification_year_summary": "modification_year_summary.csv",
     "activity_age_summary": "activity_age_summary.csv",
+    "files": "files.csv",
+    "content_inventory": "content_inventory.csv",
+    "video_inventory": "video_inventory.csv",
+    "audio_inventory": "audio_inventory.csv",
+    "document_inventory": "document_inventory.csv",
+    "interactive_content_inventory": "interactive_content_inventory.csv",
+    "external_media_inventory": "external_media_inventory.csv",
+    "content_category_summary": "content_category_summary.csv",
+    "hosting_summary": "hosting_summary.csv",
 }
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
-SCHEMA_NAME = "cloudpedagogy-moodle-audit"
-SUPPORTED_SCHEMA_MAJOR = 1
-
-# These columns form the documented contract between the auditor and dashboard.
-# A file remains optional, but when it exists its essential columns are checked.
-DATASET_SCHEMAS: Dict[str, Tuple[str, ...]] = {
-    "course_summary": (),
-    "sections": ("section_number", "section_name", "activity_count_from_sequence"),
-    "activities": ("activity_type",),
-    "section_activity_breakdown": ("section_number",),
-    "book_inventory": ("activity_name", "book_chapter_count_from_xml"),
-    "duplicate_activity_inventory": ("activity_name", "occurrence_count"),
-    "hidden_content_summary": ("activity_type", "hidden_activity_count"),
-    "hidden_activity_inventory": (
-        "activity_name",
-        "activity_type",
-        "section_number",
-        "section_name",
-        "last_modified_from_xml",
-    ),
-    "external_dependency_inventory": (
-        "activity_name",
-        "xml_external_link_count",
-        "xml_iframe_count",
-        "xml_webcal_link_count",
-        "xml_panopto_link_count",
-    ),
-    "external_domain_inventory": ("domain", "reference_count_in_xml"),
-    "file_extension_inventory": ("extension", "file_count"),
-    "largest_files": (
-        "filename_from_xml",
-        "filesize_from_xml_mb",
-        "extension_from_filename",
-        "mimetype_from_xml",
-    ),
-    "modification_year_summary": ("modified_year_from_xml", "activity_count"),
-    "activity_age_summary": ("activity_age_band", "activity_count"),
-}
 
 
-def add_issue(
-    issues: List[Dict[str, str]],
-    level: str,
-    source: str,
-    message: str,
-) -> None:
-    issues.append({"level": level, "source": source, "message": message})
+# ============================================================================
+# OPTIONAL DATA INTEGRATION: MOODLE BOOK ACCESS / NON-ACCESS REPORT
+# ============================================================================
+# The dashboard works normally from the audit output files alone.
+#
+# If exactly one CSV is present in:
+#
+#   moodle_data_imports/
+#       content_access_distribution/
+#           books/
+#
+# the script will try to match each CSV row to the corresponding Moodle Book
+# in book_inventory.csv and add access, non-access and reach information.
+#
+# The audit output folder and moodle_data_imports folder should be siblings:
+#
+#   project/
+#   ├── moodle_audit_output/
+#   └── moodle_data_imports/
+#       └── content_access_distribution/
+#           └── books/
+#               └── any_filename.csv
+#
+# Missing, empty, ambiguous or incompatible optional data will never stop the
+# dashboard from being generated. The original audit-only Book chart is used.
+# ============================================================================
+BOOK_ACCESS_IMPORT_RELATIVE_PATH = Path(
+    "moodle_data_imports/content_access_distribution/books"
+)
 
 
-def read_csv_optional(
-    folder: Path,
-    filename: str,
-    issues: List[Dict[str, str]],
-) -> pd.DataFrame:
-    """Read an optional CSV and preserve the reason when it cannot be used."""
+
+def read_csv_optional(folder: Path, filename: str) -> pd.DataFrame:
+    """Read a CSV from folder, returning an empty DataFrame when missing/empty."""
     path = folder / filename
-    if not path.exists():
-        return pd.DataFrame()
-    if path.stat().st_size == 0:
-        add_issue(issues, "warning", filename, "File is present but empty.")
+    if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame()
     try:
-        # utf-8-sig also accepts ordinary UTF-8 and removes an Excel-style BOM.
-        return pd.read_csv(path, encoding="utf-8-sig")
+        return pd.read_csv(path)
     except pd.errors.EmptyDataError:
-        add_issue(issues, "warning", filename, "File contains no columns or rows.")
         return pd.DataFrame()
     except Exception as exc:
-        add_issue(issues, "error", filename, f"Could not read CSV: {exc}")
+        print(f"Warning: could not read {path}: {exc}")
         return pd.DataFrame()
 
 
-def read_json_optional(
-    folder: Path,
-    filename: str,
-    issues: List[Dict[str, str]],
-) -> Dict[str, Any]:
+def read_json_optional(folder: Path, filename: str) -> Dict[str, Any]:
     path = folder / filename
-    if not path.exists():
-        return {}
-    if path.stat().st_size == 0:
-        add_issue(issues, "warning", filename, "File is present but empty.")
+    if not path.exists() or path.stat().st_size == 0:
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(value, dict):
-            add_issue(issues, "error", filename, "Top-level JSON value must be an object.")
-            return {}
-        return value
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        add_issue(issues, "error", filename, f"Could not read JSON: {exc}")
+        print(f"Warning: could not read {path}: {exc}")
         return {}
 
 
 def load_audit_folder(folder: Path) -> Dict[str, Any]:
-    issues: List[Dict[str, str]] = []
-    data: Dict[str, Any] = {"_input_issues": issues}
+    data: Dict[str, Any] = {}
     for key, filename in AUDIT_FILES.items():
         if filename.endswith(".csv"):
-            data[key] = read_csv_optional(folder, filename, issues)
+            data[key] = read_csv_optional(folder, filename)
         elif filename.endswith(".json"):
-            data[key] = read_json_optional(folder, filename, issues)
-    validate_schema(data, issues)
+            data[key] = read_json_optional(folder, filename)
     return data
-
-
-def validate_schema(
-    data: Dict[str, Any],
-    issues: List[Dict[str, str]],
-) -> None:
-    """Validate schema metadata and essential columns in files that are present."""
-    audit_data = data.get("audit_data", {})
-    schema_name = ""
-    schema_version = ""
-    if isinstance(audit_data, dict):
-        schema = audit_data.get("schema", {})
-        if isinstance(schema, dict):
-            schema_name = clean_label(schema.get("name"))
-            schema_version = clean_label(schema.get("version"))
-        schema_name = schema_name or clean_label(audit_data.get("schema_name"))
-        schema_version = schema_version or clean_label(audit_data.get("schema_version"))
-
-    if not schema_version:
-        add_issue(
-            issues,
-            "info",
-            AUDIT_FILES["audit_data"],
-            "No schema version is declared. Legacy auditor output will be interpreted using the v1 column contract.",
-        )
-    else:
-        if schema_name and schema_name != SCHEMA_NAME:
-            add_issue(
-                issues,
-                "error",
-                AUDIT_FILES["audit_data"],
-                f"Unexpected schema name {schema_name!r}; expected {SCHEMA_NAME!r}.",
-            )
-        try:
-            major = int(schema_version.split(".", 1)[0])
-            if major != SUPPORTED_SCHEMA_MAJOR:
-                add_issue(
-                    issues,
-                    "error",
-                    AUDIT_FILES["audit_data"],
-                    f"Unsupported schema version {schema_version!r}; this dashboard supports major version {SUPPORTED_SCHEMA_MAJOR}.",
-                )
-        except ValueError:
-            add_issue(
-                issues,
-                "error",
-                AUDIT_FILES["audit_data"],
-                f"Invalid schema version {schema_version!r}.",
-            )
-
-    for key, required in DATASET_SCHEMAS.items():
-        df = data.get(key)
-        if not isinstance(df, pd.DataFrame) or df.empty or not required:
-            continue
-        missing = [column for column in required if column not in df.columns]
-        if missing:
-            add_issue(
-                issues,
-                "error",
-                AUDIT_FILES[key],
-                "Missing required column(s): " + ", ".join(missing),
-            )
 
 
 def has_columns(df: pd.DataFrame, columns: Iterable[str]) -> bool:
     return not df.empty and all(col in df.columns for col in columns)
-
-
-def hover_columns(df: pd.DataFrame, columns: Iterable[str]) -> Dict[str, bool]:
-    """Build a Plotly hover_data mapping containing only available columns."""
-    return {column: True for column in columns if column in df.columns}
 
 
 def numeric_series(df: pd.DataFrame, column: str) -> pd.Series:
@@ -266,28 +179,9 @@ def numeric_series(df: pd.DataFrame, column: str) -> pd.Series:
 
 
 def clean_label(value: Any) -> str:
-    if value is None:
+    if pd.isna(value):
         return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    return str(value).strip()
-
-
-def safe_number(value: Any) -> Optional[float]:
-    """Return a finite number, or None for blank, malformed and infinite input."""
-    value = clean_label(value)
-    if not value:
-        return None
-    converted = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if pd.isna(converted):
-        return None
-    number = float(converted)
-    if not pd.notna(number) or number in (float("inf"), float("-inf")):
-        return None
-    return number
+    return str(value)
 
 
 def shorten(text: Any, max_len: int = 70) -> str:
@@ -311,25 +205,22 @@ def value_from_sources(data: Dict[str, Any], key: str, default: Any = "") -> Any
     """Fetch a summary value from course_summary first, then audit_data.summary."""
     summary_df = data.get("course_summary", pd.DataFrame())
     if isinstance(summary_df, pd.DataFrame) and not summary_df.empty and key in summary_df.columns:
-        value = summary_df.iloc[0].get(key, default)
-        return default if clean_label(value) == "" else value
+        return summary_df.iloc[0].get(key, default)
 
     audit_data = data.get("audit_data", {})
     if isinstance(audit_data, dict):
         summary = audit_data.get("summary", {}) or {}
         course = audit_data.get("course", {}) or {}
         if key in summary:
-            value = summary.get(key, default)
-            return default if clean_label(value) == "" else value
+            return summary.get(key, default)
         if key in course:
-            value = course.get(key, default)
-            return default if clean_label(value) == "" else value
+            return course.get(key, default)
     return default
 
 
 def course_title(data: Dict[str, Any], folder: Path) -> str:
-    title = clean_label(value_from_sources(data, "course_fullname_from_xml", "")) or clean_label(value_from_sources(data, "fullname", ""))
-    shortname = clean_label(value_from_sources(data, "course_shortname_from_xml", "")) or clean_label(value_from_sources(data, "shortname", ""))
+    title = value_from_sources(data, "course_fullname_from_xml", "") or value_from_sources(data, "fullname", "")
+    shortname = value_from_sources(data, "course_shortname_from_xml", "") or value_from_sources(data, "shortname", "")
     if title and shortname:
         return f"{title} ({shortname})"
     return title or shortname or folder.name
@@ -351,13 +242,15 @@ def make_metric_cards(data: Dict[str, Any]) -> str:
     cards = []
     for label, key, note in metrics:
         val = value_from_sources(data, key, None)
-        if clean_label(val) == "":
+        if val is None or val == "":
             continue
-        number = safe_number(val)
         if key == "total_file_size_mb_from_files_xml":
-            display = f"{number:,.1f} MB" if number is not None else safe_html(val)
+            display = f"{float(val):,.1f} MB" if str(val) not in ("", "nan") else "0 MB"
         else:
-            display = f"{number:,.0f}" if number is not None else safe_html(val)
+            try:
+                display = f"{float(val):,.0f}"
+            except Exception:
+                display = safe_html(val)
         cards.append(
             f"""
             <div class="metric-card">
@@ -370,7 +263,7 @@ def make_metric_cards(data: Dict[str, Any]) -> str:
     return "\n".join(cards)
 
 
-def fig_to_div(fig: go.Figure) -> str:
+def fig_to_div(fig: go.Figure, include_plotlyjs: bool = False) -> str:
     fig.update_layout(
         template="plotly_white",
         margin=dict(l=40, r=25, t=55, b=45),
@@ -378,19 +271,11 @@ def fig_to_div(fig: go.Figure) -> str:
         legend_title_text="",
         font=dict(family="Arial, sans-serif", size=13),
     )
-    chart_title = clean_label(getattr(fig.layout.title, "text", "")) or "Interactive chart"
-    chart_html = to_html(
+    return to_html(
         fig,
-        include_plotlyjs=False,
+        include_plotlyjs=(PLOTLY_CDN if include_plotlyjs else False),
         full_html=False,
         config={"responsive": True, "displaylogo": False},
-    )
-    return (
-        f'<div class="chart" role="img" aria-label="{safe_html(chart_title)}">'
-        f"{chart_html}"
-        f'<p class="sr-only">{safe_html(chart_title)}. Interactive Plotly chart; '
-        "use the chart controls or review the accompanying panel description.</p>"
-        "</div>"
     )
 
 
@@ -436,7 +321,7 @@ def make_activity_type_chart(data: Dict[str, Any]) -> Optional[str]:
         text="count",
     )
     fig.update_traces(textposition="outside", cliponaxis=False)
-    return fig_to_div(fig)
+    return fig_to_div(fig, include_plotlyjs=True)
 
 
 def make_section_activity_chart(data: Dict[str, Any]) -> Optional[str]:
@@ -453,10 +338,7 @@ def make_section_activity_chart(data: Dict[str, Any]) -> Optional[str]:
         y="activity_count_from_sequence",
         title="Activities per section",
         labels={"section_label": "Section", "activity_count_from_sequence": "Activities"},
-        hover_data={
-            **hover_columns(df, ["section_name", "visible"]),
-            "section_label": False,
-        },
+        hover_data={"section_name": True, "visible": True, "section_label": False},
     )
     fig.update_layout(xaxis_tickangle=-35, height=500)
     return fig_to_div(fig)
@@ -495,32 +377,697 @@ def make_section_breakdown_chart(data: Dict[str, Any]) -> Optional[str]:
     return fig_to_div(fig)
 
 
-def make_book_chart(data: Dict[str, Any]) -> Optional[str]:
-    books = data.get("book_inventory", pd.DataFrame())
-    if not has_columns(books, ["activity_name", "book_chapter_count_from_xml"]):
-        return None
-    df = books.copy()
-    df["book_chapter_count_from_xml"] = numeric_series(df, "book_chapter_count_from_xml")
-    df["xml_text_word_count_estimate"] = numeric_series(df, "xml_text_word_count_estimate")
-    df = df.sort_values("book_chapter_count_from_xml", ascending=False).head(25)
-    if df.empty or df["book_chapter_count_from_xml"].sum() == 0:
-        return None
-    df["activity_label"] = df["activity_name"].map(lambda x: shorten(x, 60))
-    fig = px.bar(
-        df.sort_values("book_chapter_count_from_xml", ascending=True),
-        x="book_chapter_count_from_xml",
-        y="activity_label",
-        orientation="h",
-        title="Top Moodle Books by chapter count",
-        labels={"book_chapter_count_from_xml": "Chapters", "activity_label": "Book"},
-        hover_data=hover_columns(
-            df,
-            ["activity_name", "xml_text_word_count_estimate", "visible"],
-        ),
-    )
-    fig.update_layout(height=max(430, min(850, 28 * len(df) + 120)))
-    return fig_to_div(fig)
 
+# ============================================================================
+# OPTIONAL DATA INTEGRATION HELPERS: MOODLE BOOK ACCESS / NON-ACCESS REPORT
+# ============================================================================
+
+def normalise_heading(value: Any) -> str:
+    """Normalise a CSV heading so small naming differences can be tolerated."""
+    text = clean_label(value).strip().lower().replace("\u00a0", " ")
+    text = re.sub(r"[^a-z0-9%]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalise_book_title(value: Any) -> str:
+    """
+    Normalise a Moodle Book title for matching.
+
+    Meaningful suffixes such as '(scr)' are retained so similarly named Books
+    are not silently combined.
+    """
+    text = clean_label(value).strip().lower().replace("\u00a0", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip()
+
+
+def find_column(
+    df: pd.DataFrame,
+    exact_aliases: Iterable[str],
+    required_tokens: Optional[Iterable[str]] = None,
+    forbidden_tokens: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    """Find a column by exact aliases first, then by required/forbidden tokens."""
+    if df.empty:
+        return None
+
+    aliases = {normalise_heading(alias) for alias in exact_aliases}
+    headings = {column: normalise_heading(column) for column in df.columns}
+
+    for column, heading in headings.items():
+        if heading in aliases:
+            return column
+
+    if required_tokens:
+        required = [normalise_heading(token) for token in required_tokens]
+        forbidden = [
+            normalise_heading(token) for token in (forbidden_tokens or [])
+        ]
+        for column, heading in headings.items():
+            if all(token in heading for token in required) and not any(
+                token in heading for token in forbidden
+            ):
+                return column
+
+    return None
+
+
+def read_optional_moodle_csv(path: Path) -> pd.DataFrame:
+    """Read a Moodle CSV while tolerating common encodings and delimiters."""
+    attempts = [
+        {"encoding": "utf-8-sig", "sep": None, "engine": "python"},
+        {"encoding": "utf-8", "sep": None, "engine": "python"},
+        {"encoding": "cp1252", "sep": None, "engine": "python"},
+    ]
+    last_error: Optional[Exception] = None
+
+    for options in attempts:
+        try:
+            return pd.read_csv(path, **options)
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Unable to read {path.name}: {last_error}")
+
+
+def locate_optional_book_access_csv(
+    audit_output_folder: Path,
+) -> Tuple[Optional[Path], List[str]]:
+    """
+    Locate one optional Books access CSV.
+
+    The import folder is resolved from the parent of the audit output folder.
+    """
+    messages: List[str] = []
+    project_root = audit_output_folder.resolve().parent
+    import_folder = project_root / BOOK_ACCESS_IMPORT_RELATIVE_PATH
+
+    if not import_folder.exists():
+        return None, messages
+
+    csv_files = sorted(
+        path
+        for path in import_folder.glob("*.csv")
+        if path.is_file() and path.stat().st_size > 0
+    )
+
+    if not csv_files:
+        return None, messages
+
+    if len(csv_files) > 1:
+        messages.append(
+            "More than one CSV was found in "
+            f"{import_folder}. Optional Book access integration was skipped. "
+            "Leave exactly one CSV in this folder."
+        )
+        return None, messages
+
+    return csv_files[0], messages
+
+
+def standardise_book_access_report(
+    raw: pd.DataFrame,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Convert the optional Moodle export to a standard Book-level schema.
+
+    The expected logical fields are:
+      - Book title
+      - Access count
+      - Non-access count
+      - Reach percentage (optional because it can be calculated)
+
+    Moodle report column names vary, so aliases are deliberately flexible.
+    """
+    messages: List[str] = []
+    if raw.empty:
+        return pd.DataFrame(), messages
+
+    title_column = find_column(
+        raw,
+        [
+            "book",
+            "book name",
+            "activity",
+            "activity name",
+            "content",
+            "contents",
+            "content name",
+            "resource",
+            "resource name",
+            "name",
+            "title",
+        ],
+    )
+
+    no_access_column = find_column(
+        raw,
+        [
+            "no access",
+            "not accessed",
+            "non access",
+            "non-access",
+            "without access",
+            "students without access",
+            "users without access",
+            "number not accessed",
+        ],
+        required_tokens=["access"],
+        forbidden_tokens=[],
+    )
+    if no_access_column is not None:
+        heading = normalise_heading(no_access_column)
+        if not any(token in heading for token in ["no", "not", "non", "without"]):
+            no_access_column = None
+
+    access_column = find_column(
+        raw,
+        [
+            "access",
+            "accessed",
+            "with access",
+            "students with access",
+            "users with access",
+            "number accessed",
+            "access count",
+        ],
+        required_tokens=["access"],
+        forbidden_tokens=["no", "not", "non", "without", "%", "percent", "percentage"],
+    )
+
+    reach_column = find_column(
+        raw,
+        [
+            "reach",
+            "reach %",
+            "access %",
+            "access percentage",
+            "percentage accessed",
+            "percent accessed",
+        ],
+    )
+
+    if title_column is None:
+        messages.append(
+            "The optional Books CSV was found, but no Book-title column could "
+            "be identified. Audit-only mode was used."
+        )
+        return pd.DataFrame(), messages
+
+    if access_column is None and no_access_column is None and reach_column is None:
+        messages.append(
+            "The optional Books CSV was found, but no access, non-access or "
+            "reach columns could be identified. Audit-only mode was used."
+        )
+        return pd.DataFrame(), messages
+
+    result = pd.DataFrame()
+    result["access_book_title"] = raw[title_column].map(clean_label).str.strip()
+    result["normalised_book_title"] = result["access_book_title"].map(
+        normalise_book_title
+    )
+
+    def parse_number(column: Optional[str]) -> pd.Series:
+        if column is None:
+            return pd.Series([pd.NA] * len(raw), index=raw.index, dtype="Float64")
+        cleaned = (
+            raw[column]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace("%", "", regex=False)
+            .str.strip()
+        )
+        return pd.to_numeric(cleaned, errors="coerce").astype("Float64")
+
+    result["access_count"] = parse_number(access_column)
+    result["no_access_count"] = parse_number(no_access_column)
+    result["reach_percent"] = parse_number(reach_column)
+
+    denominator = result["access_count"] + result["no_access_count"]
+    calculated_reach = (
+        result["access_count"] / denominator.where(denominator > 0)
+    ) * 100
+    result["reach_percent"] = result["reach_percent"].fillna(calculated_reach)
+
+    result = result[result["normalised_book_title"] != ""].copy()
+
+    duplicate_mask = result["normalised_book_title"].duplicated(keep=False)
+    if duplicate_mask.any():
+        duplicate_names = (
+            result.loc[duplicate_mask, "access_book_title"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        messages.append(
+            "Duplicate Book titles were found in the optional CSV and excluded "
+            "from automatic matching: "
+            + "; ".join(duplicate_names[:10])
+        )
+        result = result.loc[~duplicate_mask].copy()
+
+    return result, messages
+
+
+def merge_book_access_data(
+    books: pd.DataFrame,
+    access_data: pd.DataFrame,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Left-join optional access data onto the audit Book inventory."""
+    messages: List[str] = []
+    merged_source = books.copy()
+    merged_source["normalised_book_title"] = merged_source["activity_name"].map(
+        normalise_book_title
+    )
+
+    if access_data.empty:
+        merged_source["access_book_title"] = pd.NA
+        merged_source["access_count"] = pd.NA
+        merged_source["no_access_count"] = pd.NA
+        merged_source["reach_percent"] = pd.NA
+        return merged_source, messages
+
+    duplicate_audit_mask = merged_source["normalised_book_title"].duplicated(
+        keep=False
+    )
+    if duplicate_audit_mask.any():
+        duplicate_keys = set(
+            merged_source.loc[
+                duplicate_audit_mask, "normalised_book_title"
+            ].tolist()
+        )
+        duplicate_names = (
+            merged_source.loc[duplicate_audit_mask, "activity_name"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        messages.append(
+            "Some audit Books share the same normalised title and were excluded "
+            "from automatic access matching: "
+            + "; ".join(duplicate_names[:10])
+        )
+        access_data = access_data[
+            ~access_data["normalised_book_title"].isin(duplicate_keys)
+        ].copy()
+
+    merged = merged_source.merge(
+        access_data[
+            [
+                "normalised_book_title",
+                "access_book_title",
+                "access_count",
+                "no_access_count",
+                "reach_percent",
+            ]
+        ],
+        on="normalised_book_title",
+        how="left",
+        validate="many_to_one",
+    )
+
+    matched_count = int(merged["access_book_title"].notna().sum())
+    unmatched_count = int(
+        (~access_data["normalised_book_title"].isin(
+            set(merged_source["normalised_book_title"])
+        )).sum()
+    )
+
+    if matched_count == 0:
+        messages.append(
+            "The optional Books CSV was loaded, but no Book titles matched "
+            "book_inventory.csv. Audit-only values are still displayed."
+        )
+    if unmatched_count:
+        messages.append(
+            f"{unmatched_count} row(s) in the optional Books CSV did not match "
+            "a Book in book_inventory.csv."
+        )
+
+    return merged, messages
+
+
+def integration_messages_html(messages: Iterable[str]) -> str:
+    """Render optional integration messages without treating them as failures."""
+    items = [message for message in messages if message]
+    if not items:
+        return ""
+    return (
+        '<div class="integration-note">'
+        "<strong>Optional Book data integration</strong>"
+        "<ul>"
+        + "".join(f"<li>{safe_html(message)}</li>" for message in items)
+        + "</ul></div>"
+    )
+
+def make_book_chart(
+    data: Dict[str, Any],
+    audit_output_folder: Path,
+) -> Tuple[Optional[str], List[str]]:
+    """
+    Build the Moodle Book visualisation.
+
+    Audit-only mode:
+        Shows the original horizontal page-count chart.
+
+    Optional access-data mode:
+        Shows four parallel horizontal charts using exactly the same Book order:
+          1. Moodle Book pages
+          2. Students with access
+          3. Students with no access
+          4. Reach percentage
+
+    Hidden Books are excluded from these charts but remain available in the
+    later Hidden and duplicate content section. The access data is never
+    overlaid on the page bars, and no duplicate summary table is produced.
+    """
+    messages: List[str] = []
+    books = data.get("book_inventory", pd.DataFrame())
+    if books.empty or "activity_name" not in books.columns:
+        return None, messages
+
+    if "book_page_count_from_xml" in books.columns:
+        page_count_column = "book_page_count_from_xml"
+    elif "book_chapter_count_from_xml" in books.columns:
+        page_count_column = "book_chapter_count_from_xml"
+    else:
+        return None, messages
+
+    df = books.copy()
+    df["moodle_book_page_count"] = numeric_series(df, page_count_column)
+    df["xml_text_word_count_estimate"] = numeric_series(
+        df, "xml_text_word_count_estimate"
+    )
+
+    if "book_top_level_chapter_count_from_xml" in df.columns:
+        df["book_top_level_chapter_count_from_xml"] = numeric_series(
+            df, "book_top_level_chapter_count_from_xml"
+        )
+
+    if "book_subchapter_count_from_xml" in df.columns:
+        df["book_subchapter_count_from_xml"] = numeric_series(
+            df, "book_subchapter_count_from_xml"
+        )
+
+    # ========================================================================
+    # VISIBLE-BOOK FILTER FOR THE MAIN MOODLE BOOK VISUALISATION
+    # ========================================================================
+    # Hidden Books are excluded only from this local visualisation dataset.
+    # They remain available later in the dashboard through:
+    #   - hidden_content_summary.csv
+    #   - hidden_activity_inventory.csv
+    #   - the overall Hidden activities metric
+    #
+    # Moodle CSV values may appear as 0, 0.0, False, "false", "hidden", etc.,
+    # so both numeric and text representations are handled.
+    # ========================================================================
+    hidden_book_count = 0
+
+    if "visible" in df.columns:
+        visible_numeric = pd.to_numeric(df["visible"], errors="coerce")
+        visible_text = (
+            df["visible"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+
+        hidden_mask = visible_numeric.eq(0) | visible_text.isin(
+            ["0", "0.0", "false", "no", "hidden"]
+        )
+
+        hidden_book_count = int(hidden_mask.sum())
+        df = df.loc[~hidden_mask].copy()
+
+        if hidden_book_count:
+            messages.append(
+                f"{hidden_book_count} hidden Moodle Book"
+                f"{'s were' if hidden_book_count != 1 else ' was'} excluded "
+                "from the Moodle Book footprint and access charts. "
+                "Hidden Books remain available in the later Hidden and "
+                "duplicate content section."
+            )
+
+    # ========================================================================
+    # OPTIONAL DATA INTEGRATION: LOAD AND MATCH THE BOOKS ACCESS CSV
+    # ========================================================================
+    optional_csv, locate_messages = locate_optional_book_access_csv(
+        audit_output_folder
+    )
+    messages.extend(locate_messages)
+
+    access_data = pd.DataFrame()
+    if optional_csv is not None:
+        try:
+            raw_access = read_optional_moodle_csv(optional_csv)
+            access_data, standardise_messages = standardise_book_access_report(
+                raw_access
+            )
+            messages.extend(standardise_messages)
+        except Exception as exc:
+            messages.append(
+                f"Could not load optional Books CSV {optional_csv.name}: {exc}. "
+                "Audit-only mode was used."
+            )
+
+    df, merge_messages = merge_book_access_data(df, access_data)
+    messages.extend(merge_messages)
+
+    # Keep one stable ordering for every parallel chart.
+    df = df.sort_values("moodle_book_page_count", ascending=False).head(25)
+    if df.empty or df["moodle_book_page_count"].sum() == 0:
+        return None, messages
+
+    df["activity_label"] = df["activity_name"].map(
+        lambda value: shorten(value, 58)
+    )
+    ordered = df.sort_values("moodle_book_page_count", ascending=True).copy()
+    has_access_data = ordered["access_book_title"].notna().any()
+
+    # ------------------------------------------------------------------------
+    # AUDIT-ONLY MODE: preserve the original horizontal Book page chart.
+    # ------------------------------------------------------------------------
+    if not has_access_data:
+        hover_data: Dict[str, Any] = {
+            "activity_name": True,
+            "moodle_book_page_count": True,
+            "xml_text_word_count_estimate": True,
+            "visible": True,
+            "activity_label": False,
+        }
+
+        if "book_top_level_chapter_count_from_xml" in ordered.columns:
+            hover_data["book_top_level_chapter_count_from_xml"] = True
+
+        if "book_subchapter_count_from_xml" in ordered.columns:
+            hover_data["book_subchapter_count_from_xml"] = True
+
+        fig = px.bar(
+            ordered,
+            x="moodle_book_page_count",
+            y="activity_label",
+            orientation="h",
+            title="Top Moodle Books by page count",
+            labels={
+                "moodle_book_page_count": "Moodle Book pages",
+                "activity_label": "Book",
+                "xml_text_word_count_estimate": "Estimated XML words",
+                "book_top_level_chapter_count_from_xml": "Top-level chapters",
+                "book_subchapter_count_from_xml": "Subchapters",
+                "visible": "Visible",
+            },
+            hover_data=hover_data,
+            text="moodle_book_page_count",
+        )
+        fig.update_traces(
+            texttemplate="%{text:,.0f} pages",
+            textposition="outside",
+            cliponaxis=False,
+        )
+        fig.update_layout(
+            height=max(460, min(900, 34 * len(ordered) + 150)),
+            xaxis_title="Moodle Book pages",
+            yaxis_title="Book",
+        )
+        return fig_to_div(fig), messages
+
+    # ------------------------------------------------------------------------
+    # OPTIONAL ENRICHED MODE: four aligned parallel horizontal charts.
+    # ------------------------------------------------------------------------
+    matched = ordered[ordered["access_book_title"].notna()].copy()
+
+    for column in ["access_count", "no_access_count", "reach_percent"]:
+        matched[column] = pd.to_numeric(matched[column], errors="coerce")
+
+    # Retain the audit ordering while excluding unmatched Books from the access
+    # panels. Unmatched Books remain visible in the pages panel with blanks in
+    # the other panels.
+    ordered["access_count"] = pd.to_numeric(
+        ordered["access_count"], errors="coerce"
+    )
+    ordered["no_access_count"] = pd.to_numeric(
+        ordered["no_access_count"], errors="coerce"
+    )
+    ordered["reach_percent"] = pd.to_numeric(
+        ordered["reach_percent"], errors="coerce"
+    )
+
+    subplot_titles = (
+        "Book pages",
+        "Students with access",
+        "Students with no access",
+        "Reach",
+    )
+    fig = make_subplots(
+        rows=1,
+        cols=4,
+        shared_yaxes=True,
+        horizontal_spacing=0.055,
+        column_widths=[0.27, 0.25, 0.25, 0.23],
+        subplot_titles=subplot_titles,
+    )
+
+    page_customdata = ordered[
+        ["activity_name", "xml_text_word_count_estimate", "visible"]
+    ].where(
+        pd.notna(
+            ordered[["activity_name", "xml_text_word_count_estimate", "visible"]]
+        ),
+        None,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["moodle_book_page_count"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="Pages",
+            text=ordered["moodle_book_page_count"],
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=page_customdata.to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Moodle Book pages: %{x:,.0f}<br>"
+                "Estimated XML words: %{customdata[1]:,.0f}<br>"
+                "Visible: %{customdata[2]}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["access_count"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="Access",
+            text=ordered["access_count"],
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["activity_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Students with access: %{x:,.0f}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["no_access_count"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="No access",
+            text=ordered["no_access_count"],
+            texttemplate="%{text:,.0f}",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["activity_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Students with no access: %{x:,.0f}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=3,
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["reach_percent"],
+            y=ordered["activity_label"],
+            orientation="h",
+            name="Reach",
+            text=ordered["reach_percent"],
+            texttemplate="%{text:.1f}%",
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["activity_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Reach: %{x:.1f}%"
+                "<extra></extra>"
+            ),
+            showlegend=False,
+        ),
+        row=1,
+        col=4,
+    )
+
+    fig.update_xaxes(title_text="Pages", row=1, col=1, rangemode="tozero")
+    fig.update_xaxes(title_text="Students", row=1, col=2, rangemode="tozero")
+    fig.update_xaxes(title_text="Students", row=1, col=3, rangemode="tozero")
+    fig.update_xaxes(
+        title_text="Percent",
+        row=1,
+        col=4,
+        range=[0, 100],
+        ticksuffix="%",
+    )
+
+    # Show Book labels only on the first panel. Shared y-axes keep every row
+    # exactly aligned across all four visualisations.
+    fig.update_yaxes(
+        title_text="Book",
+        showticklabels=True,
+        automargin=True,
+        row=1,
+        col=1,
+    )
+    for col in (2, 3, 4):
+        fig.update_yaxes(showticklabels=False, row=1, col=col)
+
+    fig.update_layout(
+        title="Moodle Book footprint and student access",
+        height=max(500, min(980, 38 * len(ordered) + 180)),
+        margin=dict(l=290, r=45, t=90, b=65),
+        bargap=0.28,
+    )
+
+    if optional_csv is not None:
+        matched_count = int(ordered["access_book_title"].notna().sum())
+        messages.insert(
+            0,
+            f"Loaded {optional_csv.name} and matched access data to "
+            f"{matched_count} of {len(ordered)} displayed Moodle Books."
+        )
+
+    return fig_to_div(fig), messages
 
 def make_external_domain_chart(data: Dict[str, Any]) -> Optional[str]:
     domains = data.get("external_domain_inventory", pd.DataFrame())
@@ -564,10 +1111,7 @@ def make_external_dependency_chart(data: Dict[str, Any]) -> Optional[str]:
         orientation="h",
         title="Activities with the most external dependency indicators",
         labels={"value": "Count", "activity_label": "Activity", "variable": "Indicator"},
-        hover_data=hover_columns(
-            df,
-            ["activity_name", "activity_type", "section_name"],
-        ),
+        hover_data={"activity_name": True, "activity_type": True, "section_name": True},
     )
     fig.update_layout(height=max(430, min(750, 28 * len(df) + 120)))
     return fig_to_div(fig)
@@ -618,10 +1162,253 @@ def make_largest_files_table(data: Dict[str, Any], limit: int = 15) -> Optional[
     return f"""
     <div class="table-wrap">
       <table>
-        <caption>Largest files recorded in the Moodle backup metadata</caption>
-        <thead><tr><th scope="col">Filename</th><th scope="col">MB</th><th scope="col">Ext.</th><th scope="col">MIME type</th></tr></thead>
+        <thead><tr><th>Filename</th><th>MB</th><th>Ext.</th><th>MIME type</th></tr></thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
+    </div>
+    """
+
+
+def _normalised_text_series(df: pd.DataFrame, column: str) -> pd.Series:
+    """Return a stripped, lower-case text series without turning NaN into 'nan'."""
+    if column not in df.columns:
+        return pd.Series("", index=df.index, dtype="object")
+    return df[column].fillna("").astype(str).str.strip().str.lower()
+
+
+def make_content_metric_cards(data: Dict[str, Any]) -> Optional[str]:
+    """Build evidence-based media cards from content_inventory.csv."""
+    inventory = data.get("content_inventory", pd.DataFrame())
+    if not isinstance(inventory, pd.DataFrame) or inventory.empty:
+        return None
+
+    category = _normalised_text_series(inventory, "content_category")
+    hosting = _normalised_text_series(inventory, "hosting_type")
+    source = _normalised_text_series(inventory, "source_type")
+    confidence = _normalised_text_series(inventory, "classification_confidence")
+    association = _normalised_text_series(inventory, "association_status")
+    review_reason = _normalised_text_series(inventory, "review_reason")
+
+    video = category.eq("video")
+    moodle = hosting.eq("moodle") | source.eq("moodle_file")
+    external = source.eq("external_reference") | (~hosting.isin(["", "moodle"]))
+    panopto = hosting.eq("panopto")
+    review = (
+        confidence.str.contains("review", regex=False)
+        | association.str.contains("unresolved", regex=False)
+        | review_reason.ne("")
+    )
+    size_mb = numeric_series(inventory, "size_mb")
+
+    metrics = [
+        ("Moodle-hosted videos", int((video & moodle).sum()), "Confirmed or detected from backup metadata", "count"),
+        ("Moodle video storage", float(size_mb[video & moodle].sum()), "Metadata-reported size", "mb"),
+        ("Panopto references", int((video & panopto).sum()), "Individual references in activity XML", "count"),
+        ("Other external videos", int((video & external & ~panopto).sum()), "External video references excluding Panopto", "count"),
+        ("Items needing review", int(review.sum()), "Unresolved, uncertain or explicitly flagged", "count"),
+    ]
+    cards = []
+    for label, value, note, value_type in metrics:
+        display = f"{value:,.2f} MB" if value_type == "mb" else f"{int(value):,}"
+        cards.append(
+            '<div class="metric-card">'
+            f'<div class="metric-label">{safe_html(label)}</div>'
+            f'<div class="metric-value">{display}</div>'
+            f'<div class="metric-note">{safe_html(note)}</div>'
+            '</div>'
+        )
+    return '<div class="metric-grid content-metrics">' + "".join(cards) + "</div>"
+
+
+def make_content_category_chart(data: Dict[str, Any]) -> Optional[str]:
+    summary = data.get("content_category_summary", pd.DataFrame())
+    if has_columns(summary, ["content_category", "item_count"]):
+        df = summary.copy()
+        df["item_count"] = numeric_series(df, "item_count")
+    else:
+        inventory = data.get("content_inventory", pd.DataFrame())
+        if not has_columns(inventory, ["content_category"]):
+            return None
+        categories = inventory["content_category"].fillna("unclassified").replace("", "unclassified")
+        df = categories.value_counts().rename_axis("content_category").reset_index(name="item_count")
+    df = df[df["item_count"] > 0].sort_values("item_count", ascending=True)
+    if df.empty:
+        return None
+    fig = px.bar(
+        df,
+        x="item_count",
+        y="content_category",
+        orientation="h",
+        title="Content items by category",
+        labels={"item_count": "Items", "content_category": "Category"},
+        text="item_count",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    return fig_to_div(fig)
+
+
+def make_hosting_chart(data: Dict[str, Any]) -> Optional[str]:
+    summary = data.get("hosting_summary", pd.DataFrame())
+    if has_columns(summary, ["hosting_type", "item_count"]):
+        df = summary.copy()
+        df["item_count"] = numeric_series(df, "item_count")
+    else:
+        inventory = data.get("content_inventory", pd.DataFrame())
+        if not has_columns(inventory, ["hosting_type"]):
+            return None
+        hosts = inventory["hosting_type"].fillna("unclassified").replace("", "unclassified")
+        df = hosts.value_counts().rename_axis("hosting_type").reset_index(name="item_count")
+    df = df[df["item_count"] > 0].sort_values("item_count", ascending=True)
+    if df.empty:
+        return None
+    fig = px.bar(
+        df,
+        x="item_count",
+        y="hosting_type",
+        orientation="h",
+        title="Content items by hosting type",
+        labels={"item_count": "Items", "hosting_type": "Hosting type"},
+        text="item_count",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    return fig_to_div(fig)
+
+
+def make_content_section_chart(data: Dict[str, Any]) -> Optional[str]:
+    inventory = data.get("content_inventory", pd.DataFrame())
+    if not has_columns(inventory, ["section_name", "content_category"]):
+        return None
+    df = inventory.copy()
+    df["section_name"] = df["section_name"].fillna("").astype(str).str.strip()
+    df = df[df["section_name"] != ""]
+    if df.empty:
+        return None
+    df["content_category"] = df["content_category"].fillna("unclassified").replace("", "unclassified")
+    grouped = df.groupby(["section_name", "content_category"], dropna=False).size().reset_index(name="item_count")
+    totals = grouped.groupby("section_name")["item_count"].sum().sort_values(ascending=False)
+    keep = totals.head(20).index
+    grouped = grouped[grouped["section_name"].isin(keep)]
+    order = list(reversed(list(totals.loc[keep].sort_values(ascending=False).index)))
+    grouped["section_label"] = grouped["section_name"].map(lambda value: shorten(value, 55))
+    label_order = [shorten(value, 55) for value in order]
+    fig = px.bar(
+        grouped,
+        x="item_count",
+        y="section_label",
+        color="content_category",
+        orientation="h",
+        title="Content distribution by section (top 20)",
+        labels={"item_count": "Items", "section_label": "Section", "content_category": "Category"},
+        category_orders={"section_label": label_order},
+        hover_data={"section_name": True},
+    )
+    fig.update_layout(height=max(430, min(820, 31 * len(keep) + 150)))
+    return fig_to_div(fig)
+
+
+def make_largest_moodle_videos_table(data: Dict[str, Any], limit: int = 15) -> Optional[str]:
+    videos = data.get("video_inventory", pd.DataFrame())
+    if not isinstance(videos, pd.DataFrame) or videos.empty:
+        inventory = data.get("content_inventory", pd.DataFrame())
+        if not has_columns(inventory, ["content_category"]):
+            return None
+        videos = inventory[_normalised_text_series(inventory, "content_category").eq("video")].copy()
+    if videos.empty:
+        return None
+    moodle_mask = _normalised_text_series(videos, "hosting_type").eq("moodle") | _normalised_text_series(videos, "source_type").eq("moodle_file")
+    df = videos[moodle_mask].copy()
+    if df.empty:
+        return None
+    df["size_mb"] = numeric_series(df, "size_mb")
+    df = df.sort_values("size_mb", ascending=False).head(limit)
+    rows = []
+    for _, row in df.iterrows():
+        rows.append(
+            "<tr>"
+            f"<td>{safe_html(shorten(row.get('filename_or_title', ''), 70))}</td>"
+            f"<td class=\"num\">{float(row.get('size_mb', 0)):,.2f}</td>"
+            f"<td>{safe_html(shorten(row.get('section_name', ''), 45))}</td>"
+            f"<td>{safe_html(shorten(row.get('activity_name', ''), 55))}</td>"
+            f"<td>{safe_html(row.get('association_status', ''))}</td>"
+            "</tr>"
+        )
+    return (
+        "<h3>Largest Moodle-hosted videos</h3><div class=\"table-wrap\"><table>"
+        "<thead><tr><th>File</th><th>MB</th><th>Section</th><th>Activity</th><th>Association</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def make_external_media_provider_table(data: Dict[str, Any], limit: int = 30) -> Optional[str]:
+    external = data.get("external_media_inventory", pd.DataFrame())
+    if not isinstance(external, pd.DataFrame) or external.empty:
+        inventory = data.get("content_inventory", pd.DataFrame())
+        if not has_columns(inventory, ["source_type"]):
+            return None
+        external = inventory[_normalised_text_series(inventory, "source_type").eq("external_reference")].copy()
+    if external.empty:
+        return None
+    provider_col = "provider" if "provider" in external.columns else "hosting_type"
+    if provider_col not in external.columns:
+        return None
+    grouped = external.copy()
+    grouped[provider_col] = grouped[provider_col].fillna("unclassified").replace("", "unclassified")
+    grouped["content_category"] = grouped.get("content_category", pd.Series("unclassified", index=grouped.index)).fillna("unclassified").replace("", "unclassified")
+    grouped = grouped.groupby([provider_col, "content_category"], dropna=False).size().reset_index(name="reference_count")
+    grouped = grouped.sort_values("reference_count", ascending=False).head(limit)
+    rows = [
+        "<tr>"
+        f"<td>{safe_html(row.get(provider_col, ''))}</td>"
+        f"<td>{safe_html(row.get('content_category', ''))}</td>"
+        f"<td class=\"num\">{int(row.get('reference_count', 0))}</td>"
+        "</tr>"
+        for _, row in grouped.iterrows()
+    ]
+    return (
+        "<h3>External media providers</h3><div class=\"table-wrap\"><table>"
+        "<thead><tr><th>Provider</th><th>Category</th><th>References</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def make_content_inventory_table(data: Dict[str, Any]) -> Optional[str]:
+    inventory = data.get("content_inventory", pd.DataFrame())
+    if not isinstance(inventory, pd.DataFrame) or inventory.empty:
+        return None
+    columns = [
+        ("content_category", "Category"), ("content_subtype", "Subtype"),
+        ("hosting_type", "Hosting"), ("filename_or_title", "File or title"),
+        ("size_mb", "MB"), ("section_name", "Section"),
+        ("activity_name", "Activity"), ("association_status", "Association"),
+        ("classification_confidence", "Confidence"), ("detection_method", "Detected by"),
+        ("review_reason", "Review reason"),
+    ]
+    available = [(key, label) for key, label in columns if key in inventory.columns]
+    if not available:
+        return None
+    rows = []
+    for _, row in inventory.iterrows():
+        cells = []
+        for key, _ in available:
+            value = row.get(key, "")
+            if key == "size_mb":
+                number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+                rendered = "" if pd.isna(number) else f"{float(number):,.2f}"
+                cells.append(f'<td class="num">{rendered}</td>')
+            else:
+                cells.append(f"<td>{safe_html(shorten(value, 85))}</td>")
+        search_value = " ".join(clean_label(row.get(key, "")) for key, _ in available).lower()
+        rows.append(f'<tr data-search="{safe_html(search_value)}">{"".join(cells)}</tr>')
+    headers = "".join(f"<th>{safe_html(label)}</th>" for _, label in available)
+    return f"""
+    <h3>Full content inventory</h3>
+    <div class="inventory-controls">
+      <label for="content-inventory-search">Filter inventory</label>
+      <input id="content-inventory-search" type="search" placeholder="Search category, host, filename, section, activity or status">
+      <span id="content-inventory-count" class="inventory-count">{len(rows):,} items</span>
+    </div>
+    <div class="table-wrap inventory-table-wrap">
+      <table id="content-inventory-table"><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>
     </div>
     """
 
@@ -731,8 +1518,7 @@ def make_duplicate_table(data: Dict[str, Any]) -> Optional[str]:
     return f"""
     <div class="table-wrap">
       <table>
-        <caption>Duplicate activity names</caption>
-        <thead><tr><th scope="col">Activity name</th><th scope="col">Occurrences</th></tr></thead>
+        <thead><tr><th>Activity name</th><th>Occurrences</th></tr></thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
     </div>
@@ -761,8 +1547,7 @@ def make_hidden_activity_table(data: Dict[str, Any], limit: int = 25) -> Optiona
     return f"""
     <div class="table-wrap">
       <table>
-        <caption>Hidden Moodle activities</caption>
-        <thead><tr><th scope="col">Section</th><th scope="col">Section name</th><th scope="col">Type</th><th scope="col">Activity</th><th scope="col">Modified</th></tr></thead>
+        <thead><tr><th>Section</th><th>Section name</th><th>Type</th><th>Activity</th><th>Modified</th></tr></thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
     </div>
@@ -771,7 +1556,7 @@ def make_hidden_activity_table(data: Dict[str, Any], limit: int = 25) -> Optiona
 
 def make_data_quality_notes(data: Dict[str, Any]) -> str:
     notes = [
-        "This dashboard uses Moodle backup XML metadata only.",
+        "Core dashboard measures use Moodle backup XML metadata. Optional Moodle report data is used only when explicitly detected.",
         "Uploaded binary file contents are not opened or scanned.",
         "Counts for links, iframes, image tags and word estimates refer only to HTML-like content stored directly inside XML fields.",
         "No pedagogic judgement, quality score, risk score or severity score is generated.",
@@ -781,57 +1566,14 @@ def make_data_quality_notes(data: Dict[str, Any]) -> str:
         scope = audit_data.get("audit_scope", {}) or {}
         if scope.get("scope"):
             notes.insert(0, f"Audit scope: {scope.get('scope')}.")
-    scope_html = "<ul>" + "".join(f"<li>{safe_html(note)}</li>" for note in notes) + "</ul>"
-    issues = data.get("_input_issues", [])
-    if not issues:
-        return scope_html
-
-    rows = []
-    for issue in issues:
-        level = clean_label(issue.get("level", "info")).lower() or "info"
-        rows.append(
-            "<tr>"
-            f'<td><span class="status status-{safe_html(level)}">{safe_html(level.title())}</span></td>'
-            f"<td>{safe_html(issue.get('source', ''))}</td>"
-            f"<td>{safe_html(issue.get('message', ''))}</td>"
-            "</tr>"
-        )
-    return (
-        scope_html
-        + """
-        <h3>Input and compatibility checks</h3>
-        <div class="table-wrap">
-          <table>
-            <caption>Issues detected while loading or validating audit outputs</caption>
-            <thead><tr><th scope="col">Level</th><th scope="col">Source</th><th scope="col">Details</th></tr></thead>
-            <tbody>"""
-        + "".join(rows)
-        + "</tbody></table></div>"
-    )
+    return "<ul>" + "".join(f"<li>{safe_html(note)}</li>" for note in notes) + "</ul>"
 
 
-def plotly_script_tag(mode: str, local_filename: str = "") -> str:
-    if mode == "embedded":
-        return f"<script>{get_plotlyjs()}</script>"
-    if mode == "cdn":
-        return f'<script src="{safe_html(PLOTLY_CDN)}"></script>'
-    if mode == "local":
-        if not local_filename:
-            raise ValueError("A local Plotly filename is required in local mode.")
-        return f'<script src="{safe_html(local_filename)}"></script>'
-    raise ValueError(f"Unknown Plotly mode: {mode}")
-
-
-def build_dashboard_html(
-    input_folder: Path,
-    data: Dict[str, Any],
-    plotly_mode: str = "embedded",
-    local_plotly_filename: str = "",
-) -> str:
+def build_dashboard_html(input_folder: Path, data: Dict[str, Any]) -> str:
     title = course_title(data, input_folder)
-    shortname = clean_label(value_from_sources(data, "course_shortname_from_xml", "")) or clean_label(value_from_sources(data, "shortname", ""))
-    generated_from = clean_label(value_from_sources(data, "source_backup", ""))
-    archive_type = clean_label(value_from_sources(data, "archive_type", ""))
+    shortname = value_from_sources(data, "course_shortname_from_xml", "") or value_from_sources(data, "shortname", "")
+    generated_from = value_from_sources(data, "source_backup", "")
+    archive_type = value_from_sources(data, "archive_type", "")
 
     panels: List[str] = []
 
@@ -849,17 +1591,46 @@ def build_dashboard_html(
     if section_breakdown_chart:
         panels.append(panel("Section activity mix", section_breakdown_chart, "Stacked view of activity types per section where breakdown columns are present."))
 
-    book_chart = make_book_chart(data)
+    # ========================================================================
+    # OPTIONAL DATA INTEGRATION: MOODLE BOOK ACCESS / NON-ACCESS REPORT
+    # ========================================================================
+    # The normal audit-only Book chart is always available.
+    # Optional access data is added only when one compatible CSV is detected.
+    # ========================================================================
+    book_chart, book_integration_messages = make_book_chart(
+        data,
+        input_folder,
+    )
     if book_chart:
-        panels.append(panel("Moodle Book footprint", book_chart, "Only shown when book_inventory.csv contains Moodle Book records."))
+        book_body = book_chart
+        book_body += integration_messages_html(book_integration_messages)
+
+        panels.append(
+            panel(
+                "Moodle Book footprint",
+                book_body,
+                "Visible Moodle Books only are shown here. Moodle Book pages "
+                "include both top-level chapters and subchapters. When the optional "
+                "Books access CSV is available, four parallel horizontal charts use "
+                "the same Book order: pages, access, non-access and reach. Hidden "
+                "Books remain available in the later Hidden and duplicate content "
+                "section. Older audit outputs remain supported through "
+                "book_chapter_count_from_xml.",
+            )
+        )
     else:
-        panels.append(empty_panel("Moodle Book footprint", "No Moodle Book inventory detected for this course."))
+        panels.append(
+            empty_panel(
+                "Moodle Book footprint",
+                "No Moodle Book inventory detected for this course.",
+            )
+        )
 
     external_domain_chart = make_external_domain_chart(data)
     external_dependency_chart = make_external_dependency_chart(data)
     if external_domain_chart or external_dependency_chart:
         body = "".join([x for x in [external_domain_chart, external_dependency_chart] if x])
-        panels.append(panel("External dependencies", body, "Based on external links, iframe tags, webCAL links and Panopto references in XML metadata."))
+        panels.append(panel("External dependencies", body, "Based on external links, iframe tags, webCAL links, Panopto references and LTI indicators in XML metadata."))
     else:
         panels.append(empty_panel("External dependencies", "No external dependency indicators detected in XML metadata."))
 
@@ -869,6 +1640,25 @@ def build_dashboard_html(
         panels.append(panel("File footprint", "".join([x for x in [file_extension_chart, largest_files_table] if x]), "Uses files.xml metadata. File contents are not opened."))
     else:
         panels.append(empty_panel("File footprint", "No file metadata detected."))
+
+    content_metrics = make_content_metric_cards(data)
+    content_category_chart = make_content_category_chart(data)
+    hosting_chart = make_hosting_chart(data)
+    content_section_chart = make_content_section_chart(data)
+    largest_video_table = make_largest_moodle_videos_table(data)
+    external_provider_table = make_external_media_provider_table(data)
+    content_inventory_table = make_content_inventory_table(data)
+    content_parts = [
+        content_metrics, content_category_chart, hosting_chart, content_section_chart,
+        largest_video_table, external_provider_table, content_inventory_table,
+    ]
+    if any(content_parts):
+        panels.append(panel(
+            "Media and content inventory",
+            "".join(part for part in content_parts if part),
+            "Evidence-based inventory from Moodle backup file metadata and references stored in activity XML. "
+            "Classifications are rule-based; unresolved or uncertain items remain visible rather than being guessed.",
+        ))
 
     age_chart = make_age_chart(data)
     modification_chart = make_modification_year_chart(data)
@@ -900,7 +1690,6 @@ def build_dashboard_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Moodle Audit Dashboard - {safe_html(title)}</title>
-  {plotly_script_tag(plotly_mode, local_plotly_filename)}
   <style>
     :root {{
       --bg: #f6f7fb;
@@ -916,27 +1705,6 @@ def build_dashboard_html(
       background: var(--bg);
       color: var(--text);
       line-height: 1.45;
-    }}
-    .skip-link {{
-      position: absolute;
-      left: -9999px;
-      top: 0;
-      z-index: 1000;
-      padding: 10px 14px;
-      background: #ffffff;
-      color: var(--accent);
-    }}
-    .skip-link:focus {{ left: 8px; top: 8px; }}
-    .sr-only {{
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
     }}
     header {{
       padding: 28px 32px 18px;
@@ -956,10 +1724,6 @@ def build_dashboard_html(
     h2 {{
       margin: 0 0 12px;
       font-size: 1.2rem;
-    }}
-    h3 {{
-      margin: 22px 0 8px;
-      font-size: 1rem;
     }}
     .meta {{
       color: var(--muted);
@@ -1012,20 +1776,60 @@ def build_dashboard_html(
       border-radius: 12px;
       background: #fafbfe;
     }}
+    .integration-note {{
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: #f4f7ff;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }}
+    .integration-note ul {{
+      margin-top: 6px;
+    }}
     .table-wrap {{
       overflow-x: auto;
       margin-top: 14px;
+    }}
+    h3 {{
+      margin: 24px 0 8px;
+      font-size: 1.02rem;
+    }}
+    .inventory-controls {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0;
+    }}
+    .inventory-controls input {{
+      flex: 1 1 340px;
+      min-width: 220px;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font: inherit;
+    }}
+    .inventory-count {{
+      color: var(--muted);
+      font-size: 0.9rem;
+    }}
+    .inventory-table-wrap {{
+      max-height: 620px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }}
+    .inventory-table-wrap thead th {{
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }}
     table {{
       width: 100%;
       border-collapse: collapse;
       font-size: 0.92rem;
-    }}
-    caption {{
-      text-align: left;
-      font-weight: 700;
-      color: var(--text);
-      padding: 0 0 8px;
     }}
     th, td {{
       text-align: left;
@@ -1042,16 +1846,6 @@ def build_dashboard_html(
       text-align: right;
       font-variant-numeric: tabular-nums;
     }}
-    .status {{
-      display: inline-block;
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 0.78rem;
-      font-weight: 700;
-    }}
-    .status-info {{ background: #e8f0ff; color: #2447a5; }}
-    .status-warning {{ background: #fff4d6; color: #765000; }}
-    .status-error {{ background: #fde8e8; color: #9b1c1c; }}
     ul {{
       margin: 0;
       padding-left: 1.2rem;
@@ -1065,50 +1859,50 @@ def build_dashboard_html(
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Skip to dashboard content</a>
   <header>
     <h1>Moodle Audit Dashboard</h1>
     <div class="meta"><strong>{safe_html(title)}</strong></div>
     <div class="meta">{' · '.join(header_meta)}</div>
   </header>
-  <main id="main-content">
-    <section class="metric-grid" aria-label="Course summary metrics">
+  <main>
+    <section class="metric-grid">
       {make_metric_cards(data)}
     </section>
     {''.join(panels)}
   </main>
+  <script>
+    (() => {{
+      const input = document.getElementById('content-inventory-search');
+      const table = document.getElementById('content-inventory-table');
+      const counter = document.getElementById('content-inventory-count');
+      if (!input || !table || !counter) return;
+      const rows = Array.from(table.tBodies[0].rows);
+      const update = () => {{
+        const query = input.value.trim().toLowerCase();
+        let visible = 0;
+        rows.forEach((row) => {{
+          const show = !query || (row.dataset.search || '').includes(query);
+          row.hidden = !show;
+          if (show) visible += 1;
+        }});
+        counter.textContent = `${{visible.toLocaleString()}} of ${{rows.length.toLocaleString()}} items`;
+      }};
+      input.addEventListener('input', update);
+    }})();
+  </script>
 </body>
 </html>
 """
 
 
-def generate_dashboard(
-    input_folder: Path,
-    output_path: Optional[Path] = None,
-    plotly_mode: str = "embedded",
-    plotly_path: Optional[Path] = None,
-    strict: bool = False,
-) -> Path:
+def generate_dashboard(input_folder: Path, output_path: Optional[Path] = None) -> Path:
     input_folder = input_folder.expanduser().resolve()
     if not input_folder.exists() or not input_folder.is_dir():
         raise FileNotFoundError(f"Input folder not found or not a directory: {input_folder}")
 
-    recognised_paths = [
-        input_folder / filename
-        for filename in AUDIT_FILES.values()
-        if (input_folder / filename).is_file()
-    ]
-    if not recognised_paths:
-        raise FileNotFoundError(f"No recognised Moodle audit output files found in: {input_folder}")
     data = load_audit_folder(input_folder)
-
-    issues = data.get("_input_issues", [])
-    errors = [issue for issue in issues if issue.get("level") == "error"]
-    if strict and errors:
-        details = "; ".join(
-            f"{issue.get('source')}: {issue.get('message')}" for issue in errors
-        )
-        raise ValueError(f"Audit input validation failed: {details}")
+    if all((isinstance(v, pd.DataFrame) and v.empty) or (isinstance(v, dict) and not v) for v in data.values()):
+        raise FileNotFoundError(f"No recognised Moodle audit output files found in: {input_folder}")
 
     if output_path is None:
         output_path = input_folder / "dashboard.html"
@@ -1117,28 +1911,8 @@ def generate_dashboard(
         if output_path.is_dir():
             output_path = output_path / "dashboard.html"
 
+    html_text = build_dashboard_html(input_folder, data)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    local_plotly_filename = ""
-    if plotly_mode == "local":
-        if plotly_path is None:
-            raise ValueError("--plotly-path is required when --plotly-mode local is used.")
-        source = plotly_path.expanduser().resolve()
-        if not source.is_file():
-            raise FileNotFoundError(f"Local Plotly JavaScript file not found: {source}")
-        destination = output_path.parent / source.name
-        if source != destination:
-            shutil.copy2(source, destination)
-        local_plotly_filename = destination.name
-    elif plotly_path is not None:
-        raise ValueError("--plotly-path can only be used with --plotly-mode local.")
-
-    html_text = build_dashboard_html(
-        input_folder,
-        data,
-        plotly_mode=plotly_mode,
-        local_plotly_filename=local_plotly_filename,
-    )
     output_path.write_text(html_text, encoding="utf-8")
     return output_path
 
@@ -1155,13 +1929,7 @@ def find_audit_output_folders(root: Path, recursive: bool = False) -> List[Path]
     return sorted(set(candidates))
 
 
-def run_batch(
-    root: Path,
-    recursive: bool = False,
-    plotly_mode: str = "embedded",
-    plotly_path: Optional[Path] = None,
-    strict: bool = False,
-) -> bool:
+def run_batch(root: Path, recursive: bool = False) -> None:
     folders = find_audit_output_folders(root, recursive=recursive)
     if not folders:
         raise FileNotFoundError(f"No audit output folders found in: {root}")
@@ -1169,19 +1937,13 @@ def run_batch(
     failures = 0
     for folder in folders:
         try:
-            out = generate_dashboard(
-                folder,
-                plotly_mode=plotly_mode,
-                plotly_path=plotly_path,
-                strict=strict,
-            )
+            out = generate_dashboard(folder)
             successes += 1
             print(f"Generated: {out}")
         except Exception as exc:
             failures += 1
             print(f"Failed: {folder} — {exc}")
     print(f"Batch dashboard generation complete. Successes: {successes}; failures: {failures}")
-    return failures == 0
 
 
 def main() -> None:
@@ -1190,46 +1952,16 @@ def main() -> None:
     parser.add_argument("--output", "-o", help="Output HTML path. Defaults to dashboard.html inside the input folder.")
     parser.add_argument("--batch", action="store_true", help="Generate dashboard.html for each audit output folder inside the input folder.")
     parser.add_argument("--recursive", action="store_true", help="In batch mode, search subfolders recursively.")
-    parser.add_argument(
-        "--plotly-mode",
-        choices=("embedded", "cdn", "local"),
-        default="embedded",
-        help="How to supply Plotly JavaScript. 'embedded' is standalone and is the default.",
-    )
-    parser.add_argument(
-        "--plotly-path",
-        help="Path to plotly.min.js when --plotly-mode local is selected. It is copied beside each dashboard.",
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Fail when an input file is unreadable, incompatible, or missing required columns.",
-    )
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
-    plotly_path = Path(args.plotly_path) if args.plotly_path else None
 
     if args.batch:
-        success = run_batch(
-            input_path,
-            recursive=args.recursive,
-            plotly_mode=args.plotly_mode,
-            plotly_path=plotly_path,
-            strict=args.strict,
-        )
-        if not success:
-            raise SystemExit(1)
+        run_batch(input_path, recursive=args.recursive)
         return
 
     output_path = Path(args.output).expanduser().resolve() if args.output else None
-    out = generate_dashboard(
-        input_path,
-        output_path=output_path,
-        plotly_mode=args.plotly_mode,
-        plotly_path=plotly_path,
-        strict=args.strict,
-    )
+    out = generate_dashboard(input_path, output_path=output_path)
     print(f"Dashboard generated: {out}")
 
 

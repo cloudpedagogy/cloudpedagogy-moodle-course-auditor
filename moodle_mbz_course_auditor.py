@@ -3,7 +3,7 @@
 Moodle MBZ XML Metadata Auditor
 ===============================
 
-Version: 2.0
+Version: 2.3
 
 Audits Moodle course backup files (.mbz) using XML metadata only.
 
@@ -55,6 +55,15 @@ Outputs per course:
 - sections.csv
 - files.csv
 - audit_data.json
+- content_inventory.csv
+- video_inventory.csv
+- audio_inventory.csv
+- document_inventory.csv
+- interactive_content_inventory.csv
+- external_media_inventory.csv
+- content_category_summary.csv
+- hosting_summary.csv
+- content_placement_inventory.csv
 
 Batch mode also outputs:
 - combined_course_summary.csv
@@ -74,15 +83,10 @@ import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from urllib.parse import urlparse
-
-TOOL_VERSION = "2.0.0"
-SCHEMA_NAME = "cloudpedagogy-moodle-audit"
-SCHEMA_VERSION = "1.0"
-DEFAULT_MAX_ARCHIVE_MEMBERS = 200_000
-DEFAULT_MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
+from typing import Dict, List, Optional, Any, Tuple
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 
 HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -91,6 +95,38 @@ IMG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 A_RE = re.compile(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
 SRC_RE = re.compile(r"\bsrc=[\"']([^\"']+)[\"']", re.IGNORECASE)
 HREF_RE = re.compile(r"\bhref=[\"']([^\"']+)[\"']", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+VIDEO_EXTENSIONS = {".3gp", ".avi", ".flv", ".m2v", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".ts", ".webm", ".wmv"}
+AUDIO_EXTENSIONS = {".aac", ".aiff", ".flac", ".m4a", ".mid", ".midi", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".wma"}
+IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
+DOCUMENT_EXTENSIONS = {".doc", ".docx", ".epub", ".md", ".odt", ".pdf", ".rtf", ".tex", ".txt"}
+PRESENTATION_EXTENSIONS = {".key", ".odp", ".ppt", ".pptx"}
+SPREADSHEET_EXTENSIONS = {".csv", ".numbers", ".ods", ".tsv", ".xls", ".xlsm", ".xlsx"}
+DATA_CODE_EXTENSIONS = {".do", ".ipynb", ".json", ".m", ".mat", ".por", ".py", ".r", ".rdata", ".rds", ".sav", ".sas", ".sas7bdat", ".sps", ".sql", ".xml"}
+ARCHIVE_EXTENSIONS = {".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip"}
+INTERACTIVE_EXTENSIONS = {".h5p", ".html", ".htm", ".swf"}
+
+PROVIDER_RULES = (
+    ("panopto", ("panopto.com", "panopto.eu")),
+    ("youtube", ("youtube.com", "youtu.be", "youtube-nocookie.com")),
+    ("vimeo", ("vimeo.com", "player.vimeo.com")),
+    ("microsoft_stream", ("stream.microsoft.com", "stream.office.com")),
+    ("sharepoint", ("sharepoint.com",)),
+    ("onedrive", ("1drv.ms", "onedrive.live.com")),
+    ("kaltura", ("kaltura.com", "kaltura.eu")),
+    ("zoom", ("zoom.us", "zoom.com")),
+    ("teams", ("teams.microsoft.com",)),
+)
+
+MOODLE_INTERNAL_PATH_MARKERS = (
+    "/pluginfile.php/", "/draftfile.php/", "/webservice/pluginfile.php/",
+    "/mod/book/tool/print/", "/mod/resource/view.php", "/mod/page/view.php",
+)
+TRACKING_QUERY_PARAMETERS = {
+    "fbclid", "gclid", "mc_cid", "mc_eid", "utm_campaign", "utm_content",
+    "utm_medium", "utm_source", "utm_term",
+}
 
 GENERIC_ACTIVITY_XML = {
     "module.xml",
@@ -100,6 +136,27 @@ GENERIC_ACTIVITY_XML = {
     "inforef.xml",
     "grading.xml",
 }
+
+
+class MediaReferenceParser(HTMLParser):
+    """Extract URL-bearing HTML attributes without executing or repairing HTML."""
+
+    URL_ATTRIBUTES = {"href", "src", "data", "poster"}
+    MEDIA_TAGS = {"a", "audio", "embed", "iframe", "img", "object", "source", "track", "video"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.references: List[Dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        for attribute, value in attrs:
+            if attribute.lower() in self.URL_ATTRIBUTES and value:
+                self.references.append({
+                    "url": value.strip(),
+                    "html_element": tag if tag in self.MEDIA_TAGS else "other",
+                    "html_attribute": attribute.lower(),
+                })
 
 
 def safe_text(element: Optional[ET.Element], default: str = "") -> str:
@@ -149,18 +206,6 @@ def parse_datetime_from_iso(value: str) -> Optional[dt.datetime]:
         return None
 
 
-def parse_as_of(value: Optional[str]) -> dt.datetime:
-    if not value:
-        return dt.datetime.now()
-    try:
-        parsed = dt.datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "--as-of must be an ISO date or datetime, for example 2026-07-27 or 2026-07-27T12:00:00."
-        ) from exc
-    return parsed
-
-
 def strip_html(raw: str) -> str:
     if not raw:
         return ""
@@ -177,16 +222,10 @@ def count_words_from_html(raw: str) -> int:
     return len(re.findall(r"\b\w+\b", text))
 
 
-def parse_xml(path: Path, issues: Optional[List[Dict[str, str]]] = None) -> Optional[ET.Element]:
+def parse_xml(path: Path) -> Optional[ET.Element]:
     try:
         return ET.parse(path).getroot()
-    except (ET.ParseError, OSError) as exc:
-        if issues is not None:
-            issues.append({
-                "level": "warning",
-                "source": str(path),
-                "message": f"XML could not be read: {exc}",
-            })
+    except Exception:
         return None
 
 
@@ -203,96 +242,46 @@ def detect_archive_type(path: Path) -> str:
         return "unknown"
 
 
-def _safe_archive_destination(root: Path, member_name: str) -> Path:
-    """Resolve an archive member and reject absolute paths and path traversal."""
-    member_path = Path(member_name.replace("\\", "/"))
-    if member_path.is_absolute() or ".." in member_path.parts:
-        raise RuntimeError(f"Unsafe archive member path: {member_name!r}")
-    destination = (root / member_path).resolve()
-    root_resolved = root.resolve()
-    if destination != root_resolved and root_resolved not in destination.parents:
-        raise RuntimeError(f"Archive member escapes extraction folder: {member_name!r}")
-    return destination
-
-
-def _validate_archive_limits(member_count: int, total_size: int, max_members: int, max_bytes: int) -> None:
-    if member_count > max_members:
-        raise RuntimeError(
-            f"Archive contains {member_count:,} members; safety limit is {max_members:,}. "
-            "Use --max-archive-members to change the limit."
-        )
-    if total_size > max_bytes:
-        raise RuntimeError(
-            f"Archive expands to approximately {total_size / (1024 ** 3):.2f} GiB; "
-            f"safety limit is {max_bytes / (1024 ** 3):.2f} GiB. "
-            "Use --max-uncompressed-gb to change the limit."
-        )
-
-
-def _extract_validated_tar(archive: tarfile.TarFile, destination: Path, members: List[tarfile.TarInfo]) -> None:
-    """Use Python's data filter when available, with validation above as fallback."""
+def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.getmembers():
+        target = (destination / member.name).resolve()
+        if destination != target and destination not in target.parents:
+            raise RuntimeError(f"Unsafe archive path rejected: {member.name}")
+        if member.issym() or member.islnk():
+            raise RuntimeError(f"Archive link rejected: {member.name}")
     try:
-        archive.extractall(destination, members=members, filter="data")
-    except TypeError:  # Python < 3.12
-        archive.extractall(destination, members=members)
+        archive.extractall(destination, filter="data")
+    except TypeError:  # Python versions before the filter argument
+        archive.extractall(destination)
 
 
-def extract_mbz(
-    mbz_path: Path,
-    extract_dir: Path,
-    max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
-    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-) -> str:
+def safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.infolist():
+        target = (destination / member.filename).resolve()
+        if destination != target and destination not in target.parents:
+            raise RuntimeError(f"Unsafe archive path rejected: {member.filename}")
+    archive.extractall(destination)
+
+
+def extract_mbz(mbz_path: Path, extract_dir: Path) -> str:
     archive_type = detect_archive_type(mbz_path)
 
     if archive_type == "zip":
         with zipfile.ZipFile(mbz_path, "r") as z:
-            members = z.infolist()
-            _validate_archive_limits(
-                len(members),
-                sum(max(0, member.file_size) for member in members),
-                max_members,
-                max_uncompressed_bytes,
-            )
-            for member in members:
-                _safe_archive_destination(extract_dir, member.filename)
-                unix_mode = (member.external_attr >> 16) & 0o170000
-                if unix_mode == 0o120000:
-                    raise RuntimeError(f"Symbolic links are not allowed in the archive: {member.filename!r}")
-            z.extractall(extract_dir)
+            safe_extract_zip(z, extract_dir)
         return "zip"
 
     if archive_type == "tar":
         with tarfile.open(mbz_path, "r:*") as t:
-            members = t.getmembers()
-            _validate_archive_limits(
-                len(members),
-                sum(max(0, member.size) for member in members if member.isfile()),
-                max_members,
-                max_uncompressed_bytes,
-            )
-            for member in members:
-                _safe_archive_destination(extract_dir, member.name)
-                if member.issym() or member.islnk() or member.isdev():
-                    raise RuntimeError(f"Links and device files are not allowed in the archive: {member.name!r}")
-            _extract_validated_tar(t, extract_dir, members)
+            safe_extract_tar(t, extract_dir)
         return "tar/tar.gz"
 
     if archive_type == "gzip":
         try:
             with tarfile.open(mbz_path, "r:gz") as t:
-                members = t.getmembers()
-                _validate_archive_limits(
-                    len(members),
-                    sum(max(0, member.size) for member in members if member.isfile()),
-                    max_members,
-                    max_uncompressed_bytes,
-                )
-                for member in members:
-                    _safe_archive_destination(extract_dir, member.name)
-                    if member.issym() or member.islnk() or member.isdev():
-                        raise RuntimeError(f"Links and device files are not allowed in the archive: {member.name!r}")
-                _extract_validated_tar(t, extract_dir, members)
+                safe_extract_tar(t, extract_dir)
             return "tar.gz"
         except Exception as exc:
             raise RuntimeError(
@@ -336,6 +325,141 @@ def domain_from_url(url: str) -> str:
         return ""
 
 
+def canonicalise_url(url: str) -> str:
+    """Normalise a stored URL for conservative cross-activity deduplication."""
+    try:
+        parsed = urlparse(html.unescape(url.strip()))
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower()
+        port = f":{parsed.port}" if parsed.port and not (
+            (scheme == "http" and parsed.port == 80) or (scheme == "https" and parsed.port == 443)
+        ) else ""
+        netloc = hostname + port
+        path = re.sub(r"/{2,}", "/", parsed.path or "/")
+        query = urlencode(sorted(
+            (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.lower() not in TRACKING_QUERY_PARAMETERS
+        ))
+        return urlunparse((scheme, netloc, path, "", query, ""))
+    except Exception:
+        return url.strip()
+
+
+def is_moodle_internal_reference(url: str) -> bool:
+    """Identify standard Moodle-served URLs without relying on a site hostname."""
+    try:
+        path = urlparse(url).path.lower()
+    except Exception:
+        path = url.lower()
+    return any(marker in path for marker in MOODLE_INTERNAL_PATH_MARKERS)
+
+
+def extension_from_name_or_url(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        path = urlparse(value).path if "://" in value else value
+        return Path(path).suffix.lower()
+    except Exception:
+        return ""
+
+
+def classify_content(mimetype: str = "", extension: str = "", component: str = "") -> Tuple[str, str, str]:
+    """Return category, subtype and evidence using deterministic metadata rules."""
+    mime = (mimetype or "").lower().split(";", 1)[0].strip()
+    ext = (extension or "").lower()
+    component = (component or "").lower()
+
+    # Moodle commonly stores HTML learning packages as ordinary files.  HTML
+    # MIME types and .html/.htm extensions are equivalent evidence of
+    # interactive web content; treating text/html as a generic text document
+    # creates a false MIME/extension conflict for valid packages.
+    if (
+        component in {"mod_h5pactivity", "mod_scorm"}
+        or ext in INTERACTIVE_EXTENSIONS
+        or mime in {"text/html", "application/xhtml+xml", "application/x-h5p"}
+    ):
+        category = "interactive"
+    elif mime.startswith("video/") or ext in VIDEO_EXTENSIONS:
+        category = "video"
+    elif mime.startswith("audio/") or ext in AUDIO_EXTENSIONS:
+        category = "audio"
+    elif mime.startswith("image/") or ext in IMAGE_EXTENSIONS:
+        category = "image"
+    elif ext in PRESENTATION_EXTENSIONS or mime in {"application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation"}:
+        category = "presentation"
+    elif ext in SPREADSHEET_EXTENSIONS or "spreadsheet" in mime or mime in {"text/csv", "text/tab-separated-values"}:
+        category = "spreadsheet"
+    elif ext in DATA_CODE_EXTENSIONS:
+        category = "data_or_code"
+    elif ext in DOCUMENT_EXTENSIONS or mime.startswith("text/") or mime in {"application/pdf", "application/msword", "application/rtf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}:
+        category = "document"
+    elif ext in ARCHIVE_EXTENSIONS or mime in {"application/zip", "application/x-7z-compressed", "application/x-rar-compressed", "application/gzip"}:
+        category = "archive"
+    else:
+        category = "other"
+
+    subtype = ext.lstrip(".") or (mime.split("/", 1)[1] if "/" in mime else mime) or "unknown"
+    if mime and ext:
+        evidence = "mime_and_extension"
+    elif mime:
+        evidence = "mime_type"
+    elif ext:
+        evidence = "extension"
+    elif component in {"mod_h5pactivity", "mod_scorm"}:
+        evidence = "moodle_component"
+    else:
+        evidence = "unclassified_metadata"
+    return category, subtype, evidence
+
+
+def classify_provider(url: str) -> Tuple[str, str]:
+    domain = domain_from_url(url)
+    if is_moodle_internal_reference(url):
+        return "moodle_internal", domain
+    for provider, patterns in PROVIDER_RULES:
+        if any(domain == pattern or domain.endswith("." + pattern) for pattern in patterns):
+            return provider, domain
+    # A provider does not have to be present in the built-in catalogue to be
+    # valid.  A syntactically valid external hostname is itself useful,
+    # directly extracted provider evidence.  Reserve ``other_external`` for a
+    # URL whose host cannot be determined rather than treating every unfamiliar
+    # platform as uncertain.
+    if domain:
+        return domain, domain
+    return "other_external", ""
+
+
+def strongest_html_element(elements: str) -> str:
+    """Choose the most informative recorded use of a URL deterministically."""
+    present = {element.strip().lower() for element in (elements or "").split(";") if element.strip()}
+    for element in ("video", "audio", "iframe", "embed", "object", "img", "source", "track", "a", "plain_url", "other"):
+        if element in present:
+            return element
+    return ""
+
+
+def classify_external_reference(url: str, html_element: str = "") -> Tuple[str, str, str, str]:
+    provider, domain = classify_provider(url)
+    ext = extension_from_name_or_url(url)
+    category, subtype, evidence = classify_content(extension=ext)
+    element = (html_element or "").lower()
+
+    if provider in {"panopto", "youtube", "vimeo", "microsoft_stream", "kaltura"}:
+        category, subtype, evidence = "video", provider, "provider_domain"
+    elif provider == "zoom" and any(marker in url.lower() for marker in ("/rec/", "/recording/", "recordingid", "recording_id")):
+        category, subtype, evidence = "video", "zoom_recording", "provider_url_pattern"
+    elif provider == "moodle_internal":
+        subtype, evidence = "moodle_internal_reference", "moodle_url_pattern"
+    elif category == "other" and element in {"video", "audio", "img"}:
+        category = {"video": "video", "audio": "audio", "img": "image"}[element]
+        subtype, evidence = "embedded_media", "html_element"
+    elif category == "other" and element in {"iframe", "embed", "object"}:
+        category, subtype = "interactive", "external_embed"
+        evidence = "external_domain_and_html_element" if domain else "html_element_without_valid_domain"
+    return category, subtype, provider, evidence
+
+
 def collect_xml_html_signals(raw_html_chunks: List[str]) -> Dict[str, Any]:
     """
     Collect signals from HTML-like text stored directly in Moodle XML fields.
@@ -347,15 +471,35 @@ def collect_xml_html_signals(raw_html_chunks: List[str]) -> Dict[str, Any]:
     combined = "\n".join([x for x in raw_html_chunks if x])
     decoded = html.unescape(combined)
 
-    external_links = []
-    for href in HREF_RE.findall(decoded):
-        if href.startswith(("http://", "https://")):
-            external_links.append(href)
-    for src in SRC_RE.findall(decoded):
-        if src.startswith(("http://", "https://")):
-            external_links.append(src)
+    parser = MediaReferenceParser()
+    try:
+        parser.feed(decoded)
+    except Exception:
+        pass
 
-    unique_external_links = sorted(set(external_links))
+    references_by_url: Dict[str, Dict[str, Any]] = {}
+    for reference in parser.references:
+        url = canonicalise_url(reference["url"])
+        if not url.startswith(("http://", "https://")):
+            continue
+        record = references_by_url.setdefault(url, {"url": url, "html_elements": set(), "html_attributes": set()})
+        record["html_elements"].add(reference["html_element"])
+        record["html_attributes"].add(reference["html_attribute"])
+    for url in URL_RE.findall(decoded):
+        cleaned = canonicalise_url(url.rstrip(".,;:!?)]}&quot;"))
+        references_by_url.setdefault(cleaned, {"url": cleaned, "html_elements": {"plain_url"}, "html_attributes": set()})
+
+    external_references = []
+    for url, record in sorted(references_by_url.items()):
+        external_references.append({
+            "url": url,
+            "html_elements": ";".join(sorted(record["html_elements"])),
+            "html_attributes": ";".join(sorted(record["html_attributes"])),
+        })
+    all_url_references = external_references
+    external_references = [r for r in all_url_references if not is_moodle_internal_reference(r["url"])]
+    internal_references = [r for r in all_url_references if is_moodle_internal_reference(r["url"])]
+    unique_external_links = [r["url"] for r in external_references]
     domains = [domain_from_url(url) for url in unique_external_links if domain_from_url(url)]
     webcal_links = [x for x in unique_external_links if "webcal" in x.lower()]
     panopto_links = [x for x in unique_external_links if "panopto" in x.lower()]
@@ -366,6 +510,9 @@ def collect_xml_html_signals(raw_html_chunks: List[str]) -> Dict[str, Any]:
         "xml_image_tag_count": len(IMG_RE.findall(decoded)),
         "xml_anchor_link_count": len(A_RE.findall(decoded)),
         "xml_external_links": unique_external_links,
+        "xml_external_references": external_references,
+        "xml_all_url_references": all_url_references,
+        "xml_moodle_internal_reference_count": len(internal_references),
         "xml_external_domains": domains,
         "xml_external_link_count": len(unique_external_links),
         "xml_webcal_link_count": len(set(webcal_links)),
@@ -417,19 +564,8 @@ def age_band(last_modified: str, now: Optional[dt.datetime] = None) -> str:
     return "modified_more_than_5_years_ago"
 
 
-def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[str, Any]:
-    as_of = as_of or dt.datetime.now()
-    input_issues: List[Dict[str, str]] = []
+def audit_course(root_dir: Path) -> Dict[str, Any]:
     data: Dict[str, Any] = {
-        "schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
-        "schema_name": SCHEMA_NAME,
-        "schema_version": SCHEMA_VERSION,
-        "generator": {
-            "name": "moodle_mbz_course_auditor",
-            "version": TOOL_VERSION,
-            "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-            "activity_age_as_of": as_of.isoformat(timespec="seconds"),
-        },
         "audit_scope": {
             "scope": "Moodle backup XML metadata only",
             "binary_file_content_scanned": False,
@@ -455,17 +591,23 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         "course_characteristics": [],
         "course_footprint": [],
         "files": [],
+        "content_inventory": [],
+        "video_inventory": [],
+        "audio_inventory": [],
+        "document_inventory": [],
+        "interactive_content_inventory": [],
+        "external_media_inventory": [],
+        "content_category_summary": [],
+        "hosting_summary": [],
+        "content_placement_inventory": [],
         "questions": {},
         "xml_findings": [],
         "factual_observations": [],
-        "input_issues": input_issues,
         "summary": {},
     }
 
     course_xml = root_dir / "course" / "course.xml"
-    if not course_xml.exists():
-        input_issues.append({"level": "warning", "source": str(course_xml), "message": "course.xml is absent."})
-    course_root = parse_xml(course_xml, input_issues)
+    course_root = parse_xml(course_xml)
     if course_root is not None:
         course_node = course_root.find("course") if course_root.tag != "course" else course_root
         data["course"] = {
@@ -484,9 +626,28 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
     section_order_by_id: Dict[str, int] = {}
     activity_to_section_id: Dict[str, str] = {}
 
+    # moodle_backup.xml often retains activity context identifiers even when an
+    # individual module.xml does not. Index both the activity directory and the
+    # module id; absent fields simply leave the fallback empty.
+    backup_activity_by_directory: Dict[str, Dict[str, str]] = {}
+    backup_activity_by_module_id: Dict[str, Dict[str, str]] = {}
+    backup_root = parse_xml(root_dir / "moodle_backup.xml")
+    if backup_root is not None:
+        for backup_activity in backup_root.findall(".//activity"):
+            metadata = {
+                "module_id": child_text(backup_activity, "moduleid") or child_text(backup_activity, "module_id"),
+                "context_id": child_text(backup_activity, "contextid") or child_text(backup_activity, "context_id"),
+                "directory": child_text(backup_activity, "directory").strip("/"),
+            }
+            if metadata["directory"]:
+                backup_activity_by_directory[metadata["directory"]] = metadata
+                backup_activity_by_directory[Path(metadata["directory"]).name] = metadata
+            if metadata["module_id"]:
+                backup_activity_by_module_id[metadata["module_id"]] = metadata
+
     sections_dir = root_dir / "sections"
     for section_xml in sorted(sections_dir.glob("section_*/section.xml")) if sections_dir.exists() else []:
-        section_root = parse_xml(section_xml, input_issues)
+        section_root = parse_xml(section_xml)
         if section_root is None:
             continue
 
@@ -517,6 +678,7 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
     type_counts = Counter()
     section_type_counts = defaultdict(Counter)
     all_external_domains = Counter()
+    external_reference_records: List[Dict[str, Any]] = []
 
     activities_dir = root_dir / "activities"
     for activity_dir in sorted(activities_dir.glob("*")) if activities_dir.exists() else []:
@@ -524,7 +686,7 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
             continue
 
         module_xml = activity_dir / "module.xml"
-        module_root = parse_xml(module_xml, input_issues)
+        module_root = parse_xml(module_xml)
         if module_root is None:
             continue
 
@@ -541,13 +703,16 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         hidden_book_chapter_count_from_xml = 0
         last_modified = unix_to_iso(child_text(module_root, "added"))
         raw_html_chunks: List[str] = []
+        activity_instance_id = ""
 
         if specific_xml:
-            specific_root = parse_xml(specific_xml, input_issues)
+            specific_root = parse_xml(specific_xml)
             if specific_root is not None:
                 node = specific_root.find(modulename)
                 if node is None:
                     node = list(specific_root)[0] if list(specific_root) else specific_root
+
+                activity_instance_id = node.attrib.get("id", "") or child_text(node, "id")
 
                 activity_name = child_text(node, "name")
                 raw_html_chunks.append(child_text(node, "intro"))
@@ -575,8 +740,31 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         type_counts[modulename] += 1
         section_type_counts[sectionid][modulename] += 1
 
+        backup_metadata = (
+            backup_activity_by_directory.get(activity_dir.name)
+            or backup_activity_by_directory.get(str(activity_dir.relative_to(root_dir)))
+            or backup_activity_by_module_id.get(module_id)
+            or {}
+        )
+        context_id = (
+            child_text(module_root, "contextid")
+            or module_root.attrib.get("contextid", "")
+            or backup_metadata.get("context_id", "")
+        )
+
+        inforef_file_ids: List[str] = []
+        inforef_root = parse_xml(activity_dir / "inforef.xml")
+        if inforef_root is not None:
+            for file_ref in inforef_root.findall(".//fileref/file"):
+                file_id = file_ref.attrib.get("id", "") or child_text(file_ref, "id") or safe_text(file_ref)
+                if file_id:
+                    inforef_file_ids.append(file_id)
+
         activity = {
             "module_id": module_id,
+            "context_id": context_id,
+            "activity_instance_id": activity_instance_id,
+            "inforef_file_ids": ";".join(sorted(set(inforef_file_ids))),
             "activity_folder": activity_dir.name,
             "activity_type": modulename,
             "activity_name": activity_name or activity_dir.name,
@@ -602,11 +790,27 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
             "xml_external_links_sample": "; ".join(xml_external_links[:10]),
             "last_modified_from_xml": last_modified,
             "modified_year_from_xml": year_from_iso(last_modified),
-            "activity_age_band": age_band(last_modified, now=as_of),
+            "activity_age_band": age_band(last_modified),
             "activity_xml_path": str(specific_xml.relative_to(root_dir)) if specific_xml else "",
             "module_xml_path": str(module_xml.relative_to(root_dir)),
         }
         data["activities"].append(activity)
+
+        for reference_index, reference in enumerate(signals["xml_all_url_references"], start=1):
+            external_reference_records.append({
+                "reference_index": reference_index,
+                "url": reference["url"],
+                "html_elements": reference["html_elements"],
+                "html_attributes": reference["html_attributes"],
+                "module_id": module_id,
+                "context_id": activity["context_id"],
+                "activity_name": activity["activity_name"],
+                "activity_type": activity["activity_type"],
+                "section_id": sectionid,
+                "section_number": activity["section_number"],
+                "section_name": activity["section_name"],
+                "visible": visible,
+            })
 
     data["activity_type_counts"] = dict(type_counts)
 
@@ -626,9 +830,7 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         data["section_activity_breakdown"].append(row)
 
     files_xml = root_dir / "files.xml"
-    if not files_xml.exists():
-        input_issues.append({"level": "warning", "source": str(files_xml), "message": "files.xml is absent."})
-    files_root = parse_xml(files_xml, input_issues)
+    files_root = parse_xml(files_xml)
     file_ext_counts = Counter()
     file_mimetype_counts = Counter()
     file_component_counts = Counter()
@@ -653,6 +855,7 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
             total_file_size += filesize
 
             data["files"].append({
+                "file_id_from_xml": file_node.attrib.get("id", "") or child_text(file_node, "id"),
                 "contenthash_from_xml": child_text(file_node, "contenthash"),
                 "filename_from_xml": filename,
                 "filepath_from_xml": filepath,
@@ -661,12 +864,264 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
                 "mimetype_from_xml": mimetype,
                 "component_from_xml": component,
                 "filearea_from_xml": filearea,
+                "context_id_from_xml": child_text(file_node, "contextid"),
+                "item_id_from_xml": child_text(file_node, "itemid"),
+                "user_id_from_xml": child_text(file_node, "userid"),
+                "source_from_xml": child_text(file_node, "source"),
+                "author_from_xml": child_text(file_node, "author"),
+                "license_from_xml": child_text(file_node, "license"),
+                "status_from_xml": child_text(file_node, "status"),
+                "reference_file_id_from_xml": child_text(file_node, "referencefileid"),
+                "sortorder_from_xml": child_text(file_node, "sortorder"),
+                "timecreated_from_xml": unix_to_iso(child_text(file_node, "timecreated")),
                 "timemodified_from_xml": unix_to_iso(child_text(file_node, "timemodified")),
                 "extension_from_filename": ext,
             })
 
+    activities_by_context: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    activities_by_file_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    activities_by_component_instance: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for activity in data["activities"]:
+        if activity.get("context_id"):
+            activities_by_context[str(activity["context_id"])].append(activity)
+        for file_id in str(activity.get("inforef_file_ids", "")).split(";"):
+            if file_id:
+                activities_by_file_id[file_id].append(activity)
+        instance_id = str(activity.get("activity_instance_id", ""))
+        if instance_id:
+            activities_by_component_instance[(f"mod_{activity.get('activity_type', '')}", instance_id)].append(activity)
+
+    for file_index, file_record in enumerate(data["files"], start=1):
+        filename = str(file_record.get("filename_from_xml", ""))
+        if not filename or filename == ".":
+            continue
+        context_id = str(file_record.get("context_id_from_xml", ""))
+        file_id = str(file_record.get("file_id_from_xml", ""))
+        component = str(file_record.get("component_from_xml", ""))
+        item_id = str(file_record.get("item_id_from_xml", ""))
+        match_method = ""
+        matches = activities_by_file_id.get(file_id, [])
+        if matches:
+            match_method = "direct_inforef_file_match"
+        if not matches:
+            matches = activities_by_context.get(context_id, [])
+            if matches:
+                match_method = "module_context_match"
+        if not matches and item_id not in {"", "0"}:
+            matches = activities_by_component_instance.get((component, item_id), [])
+            if matches:
+                match_method = "component_instance_match"
+        activity = matches[0] if len(matches) == 1 else {}
+        category, subtype, detection_method = classify_content(
+            str(file_record.get("mimetype_from_xml", "")),
+            str(file_record.get("extension_from_filename", "")),
+            str(file_record.get("component_from_xml", "")),
+        )
+        mime_category = classify_content(mimetype=str(file_record.get("mimetype_from_xml", "")))[0]
+        extension_category = classify_content(extension=str(file_record.get("extension_from_filename", "")))[0]
+        generic_mime = str(file_record.get("mimetype_from_xml", "")).lower().split(";", 1)[0] in {
+            "", "application/octet-stream", "text/plain", "text/xml", "application/xml"
+        }
+        metadata_conflict = (
+            not generic_mime
+            and mime_category != "other"
+            and extension_category != "other"
+            and mime_category != extension_category
+        )
+        if len(matches) == 1:
+            association_status = match_method
+        elif len(matches) > 1:
+            association_status = "ambiguous_activity_match"
+        elif component.startswith("mod_"):
+            association_status = "activity_location_unresolved"
+        else:
+            association_status = "course_or_system_context"
+
+        # Classification confidence concerns the content type only. A file can
+        # be confirmed as video even if its precise activity location is absent.
+        confidence = "confirmed"
+        review_reason = ""
+        if metadata_conflict:
+            confidence = "review"
+            review_reason = "MIME type and filename extension indicate different categories."
+        elif category == "other" and detection_method == "unclassified_metadata":
+            confidence = "review"
+            review_reason = "No recognised MIME type, extension, or Moodle component classification."
+
+        association_note = ""
+        if len(matches) > 1:
+            association_note = "Multiple activities match the available backup identifiers."
+        elif association_status == "activity_location_unresolved":
+            association_note = "The file is present in a module component, but no reliable activity relationship was found."
+
+        data["content_inventory"].append({
+            "content_id": f"moodle_file:{file_record.get('file_id_from_xml') or file_index}",
+            "source_type": "moodle_file",
+            "content_category": category,
+            "content_subtype": subtype,
+            "hosting_type": "moodle",
+            "provider": "moodle",
+            "filename_or_title": filename,
+            "url_or_reference": "",
+            "mime_type": file_record.get("mimetype_from_xml", ""),
+            "extension": file_record.get("extension_from_filename", ""),
+            "size_bytes": file_record.get("filesize_from_xml_bytes", 0),
+            "size_mb": file_record.get("filesize_from_xml_mb", 0),
+            "file_id": file_record.get("file_id_from_xml", ""),
+            "contenthash": file_record.get("contenthash_from_xml", ""),
+            "component": file_record.get("component_from_xml", ""),
+            "filearea": file_record.get("filearea_from_xml", ""),
+            "context_id": context_id,
+            "item_id": file_record.get("item_id_from_xml", ""),
+            "module_id": activity.get("module_id", ""),
+            "activity_name": activity.get("activity_name", ""),
+            "activity_type": activity.get("activity_type", ""),
+            "section_id": activity.get("section_id", ""),
+            "section_number": activity.get("section_number", ""),
+            "section_name": activity.get("section_name", ""),
+            "visible": activity.get("visible", ""),
+            "learner_facing_status": "activity_context" if activity else ("unresolved" if str(file_record.get("component_from_xml", "")).startswith("mod_") else "course_or_system_context"),
+            "detection_method": detection_method,
+            "association_status": association_status,
+            "classification_confidence": confidence,
+            "association_note": association_note,
+            "review_reason": review_reason,
+        })
+
+    # Collapse duplicate file-pool binaries in the master inventory while
+    # retaining every logical placement separately. Moodle contenthash is the
+    # strongest available identity for a stored binary; file id is the fallback.
+    file_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in data["content_inventory"]:
+        key = str(row.get("contenthash") or row.get("file_id") or row.get("content_id"))
+        file_groups[key].append(row)
+        data["content_placement_inventory"].append({**row, "reference_scope": "moodle_file"})
+
+    unique_file_rows: List[Dict[str, Any]] = []
+    for key, placements in file_groups.items():
+        resolved = next((p for p in placements if p.get("activity_name")), placements[0])
+        master = dict(resolved)
+        locations = sorted({
+            f"{p.get('section_name', '')} :: {p.get('activity_name', '')}".strip(" :")
+            for p in placements if p.get("activity_name")
+        })
+        master["content_id"] = f"moodle_content:{key}"
+        master["placement_count"] = len(placements)
+        master["activity_location_count"] = len(locations)
+        master["activity_locations"] = " | ".join(locations)
+        master["file_ids"] = ";".join(sorted({str(p.get("file_id", "")) for p in placements if p.get("file_id")}))
+        if any(p.get("classification_confidence") == "review" for p in placements):
+            review_row = next(p for p in placements if p.get("classification_confidence") == "review")
+            master["classification_confidence"] = "review"
+            master["review_reason"] = review_row.get("review_reason", "")
+        unique_file_rows.append(master)
+    data["content_inventory"] = unique_file_rows
+
+    external_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for reference in external_reference_records:
+        canonical_url = canonicalise_url(reference["url"])
+        reference["canonical_url"] = canonical_url
+        elements = reference.get("html_elements", "")
+        primary_element = strongest_html_element(elements)
+        category, subtype, provider, detection_method = classify_external_reference(canonical_url, primary_element)
+        placement = {
+            **reference,
+            "canonical_url": canonical_url,
+            "content_category": category,
+            "content_subtype": subtype,
+            "provider": provider,
+            "detection_method": detection_method,
+            "reference_scope": "moodle_internal" if provider == "moodle_internal" else "external",
+        }
+        data["content_placement_inventory"].append(placement)
+        if provider != "moodle_internal":
+            external_groups[canonical_url].append(placement)
+
+    for reference_index, (canonical_url, placements) in enumerate(sorted(external_groups.items()), start=1):
+        reference = placements[0]
+        elements = reference.get("html_elements", "")
+        primary_element = strongest_html_element(elements)
+        category, subtype, provider, detection_method = classify_external_reference(canonical_url, primary_element)
+        activity_labels = sorted({
+            f"{p.get('section_name', '')} :: {p.get('activity_name', '')}".strip(" :")
+            for p in placements if p.get("activity_name")
+        })
+        indeterminate_external = provider == "other_external"
+        data["content_inventory"].append({
+            "content_id": f"external_reference:{reference_index}",
+            "source_type": "external_reference",
+            "content_category": category,
+            "content_subtype": subtype,
+            "hosting_type": provider,
+            "provider": provider,
+            "filename_or_title": reference.get("activity_name", ""),
+            "url_or_reference": canonical_url,
+            "domain": domain_from_url(canonical_url),
+            "mime_type": "",
+            "extension": extension_from_name_or_url(canonical_url),
+            "size_bytes": "",
+            "size_mb": "",
+            "file_id": "",
+            "contenthash": "",
+            "component": "",
+            "filearea": "",
+            "context_id": reference.get("context_id", ""),
+            "item_id": "",
+            "module_id": reference.get("module_id", ""),
+            "activity_name": reference.get("activity_name", ""),
+            "activity_type": reference.get("activity_type", ""),
+            "section_id": reference.get("section_id", ""),
+            "section_number": reference.get("section_number", ""),
+            "section_name": reference.get("section_name", ""),
+            "visible": reference.get("visible", ""),
+            "learner_facing_status": "referenced_in_activity_xml",
+            "html_elements": elements,
+            "html_attributes": reference.get("html_attributes", ""),
+            "detection_method": detection_method,
+            "association_status": "direct_activity_reference",
+            "classification_confidence": "review" if indeterminate_external else "confirmed",
+            "review_reason": "External URL hostname could not be determined." if indeterminate_external else "",
+            "placement_count": len(placements),
+            "activity_location_count": len(activity_labels),
+            "activity_locations": " | ".join(activity_labels),
+        })
+
+    data["video_inventory"] = [r for r in data["content_inventory"] if r["content_category"] == "video"]
+    data["audio_inventory"] = [r for r in data["content_inventory"] if r["content_category"] == "audio"]
+    data["document_inventory"] = [r for r in data["content_inventory"] if r["content_category"] in {"document", "presentation", "spreadsheet"}]
+    data["interactive_content_inventory"] = [r for r in data["content_inventory"] if r["content_category"] == "interactive"]
+    data["external_media_inventory"] = [r for r in data["content_inventory"] if r["source_type"] == "external_reference" and r["content_category"] in {"video", "audio", "image", "interactive"}]
+
+    category_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    hosting_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in data["content_inventory"]:
+        category_groups[str(record["content_category"])].append(record)
+        hosting_groups[str(record["hosting_type"])].append(record)
+    data["content_category_summary"] = [
+        {
+            "content_category": category,
+            "item_count": len(records),
+            "placement_count": sum(parse_int(r.get("placement_count"), 1) for r in records),
+            "moodle_file_count": sum(r["source_type"] == "moodle_file" for r in records),
+            "external_reference_count": sum(r["source_type"] == "external_reference" for r in records),
+            "moodle_file_size_mb": round(sum(float(r.get("size_mb") or 0) for r in records if r["source_type"] == "moodle_file"), 3),
+        }
+        for category, records in sorted(category_groups.items())
+    ]
+    data["hosting_summary"] = [
+        {
+            "hosting_type": hosting_type,
+            "item_count": len(records),
+            "placement_count": sum(parse_int(r.get("placement_count"), 1) for r in records),
+            "video_count": sum(r["content_category"] == "video" for r in records),
+            "audio_count": sum(r["content_category"] == "audio" for r in records),
+            "total_file_size_mb": round(sum(float(r.get("size_mb") or 0) for r in records), 3),
+        }
+        for hosting_type, records in sorted(hosting_groups.items())
+    ]
+
     questions_xml = root_dir / "questions.xml"
-    questions_root = parse_xml(questions_xml, input_issues)
+    questions_root = parse_xml(questions_xml)
     question_type_counts = Counter()
     if questions_root is not None:
         for q in questions_root.findall(".//question"):
@@ -815,6 +1270,16 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         for band, count in sorted(age_counts.items(), key=lambda x: x[0])
     ]
 
+    moodle_videos = [r for r in data["video_inventory"] if r["source_type"] == "moodle_file"]
+    external_videos = [r for r in data["video_inventory"] if r["source_type"] == "external_reference"]
+    panopto_videos = [r for r in external_videos if r["provider"] == "panopto"]
+    unresolved_content = [r for r in data["content_inventory"] if r["classification_confidence"] == "review"]
+    panopto_placements = sum(parse_int(r.get("placement_count"), 1) for r in panopto_videos)
+    other_external_video_placements = sum(
+        parse_int(r.get("placement_count"), 1) for r in external_videos if r.get("provider") != "panopto"
+    )
+    moodle_video_size_mb = round(sum(float(r.get("size_mb") or 0) for r in moodle_videos), 3)
+
     primary_delivery_pattern = choose_primary_delivery_pattern(type_counts)
     dominant_activity_types = "; ".join(f"{k}: {v}" for k, v in type_counts.most_common(5))
 
@@ -834,6 +1299,13 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         "lti_activity_count_from_xml": len(lti_activities),
         "file_record_count_from_files_xml": len(data["files"]),
         "total_file_size_mb_from_files_xml": round(total_file_size / (1024 * 1024), 2),
+        "moodle_hosted_video_count": len(moodle_videos),
+        "moodle_hosted_video_size_mb": moodle_video_size_mb,
+        "panopto_video_reference_count": panopto_placements,
+        "panopto_unique_video_count": len(panopto_videos),
+        "other_external_video_reference_count": other_external_video_placements,
+        "other_external_unique_video_count": len(external_videos) - len(panopto_videos),
+        "content_items_requiring_review": len(unresolved_content),
     }]
 
     data["course_footprint"] = [{
@@ -849,6 +1321,11 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         "total_book_chapter_count_from_xml": total_book_chapters,
         "total_xml_text_word_count_estimate": total_xml_text_word_estimate,
         "external_domain_count_from_xml": len(all_external_domains),
+        "content_inventory_item_count": len(data["content_inventory"]),
+        "content_placement_count": len(data["content_placement_inventory"]),
+        "moodle_hosted_video_count": len(moodle_videos),
+        "moodle_hosted_video_size_mb": moodle_video_size_mb,
+        "external_video_reference_count": len(external_videos),
     }]
 
     findings = []
@@ -891,6 +1368,12 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         f"{round(total_file_size / (1024 * 1024), 2)} MB."
     )
     observations.append(
+        f"The content inventory identifies {len(moodle_videos)} Moodle-hosted video files "
+        f"({moodle_video_size_mb} MB), {len(panopto_videos)} unique Panopto videos across "
+        f"{panopto_placements} placements, and {len(external_videos) - len(panopto_videos)} "
+        f"other unique external videos across {other_external_video_placements} placements."
+    )
+    observations.append(
         f"questions.xml contains {data['questions']['question_count_from_questions_xml']} question records."
     )
 
@@ -926,77 +1409,36 @@ def audit_course(root_dir: Path, as_of: Optional[dt.datetime] = None) -> Dict[st
         "external_domain_count_from_xml": len(all_external_domains),
         "total_book_chapter_count_from_xml": total_book_chapters,
         "total_xml_text_word_count_estimate": total_xml_text_word_estimate,
+        "content_inventory_item_count": len(data["content_inventory"]),
+        "content_placement_count": len(data["content_placement_inventory"]),
+        "moodle_hosted_video_count": len(moodle_videos),
+        "moodle_hosted_video_size_mb": moodle_video_size_mb,
+        "panopto_video_reference_count": panopto_placements,
+        "panopto_unique_video_count": len(panopto_videos),
+        "other_external_video_reference_count": other_external_video_placements,
+        "other_external_unique_video_count": len(external_videos) - len(panopto_videos),
+        "content_items_requiring_review": len(unresolved_content),
     }
 
     return data
 
 
-CSV_MINIMUM_FIELDS: Dict[str, List[str]] = {
-    "sections.csv": ["section_number", "section_name", "activity_count_from_sequence"],
-    "activities.csv": ["activity_type"],
-    "section_activity_breakdown.csv": ["section_number"],
-    "book_inventory.csv": ["activity_name", "book_chapter_count_from_xml"],
-    "duplicate_activity_inventory.csv": ["activity_name", "occurrence_count"],
-    "hidden_content_summary.csv": ["activity_type", "hidden_activity_count"],
-    "hidden_activity_inventory.csv": [
-        "activity_name", "activity_type", "section_number", "section_name", "last_modified_from_xml"
-    ],
-    "external_dependency_inventory.csv": [
-        "activity_name", "xml_external_link_count", "xml_iframe_count",
-        "xml_webcal_link_count", "xml_panopto_link_count",
-    ],
-    "external_domain_inventory.csv": ["domain", "reference_count_in_xml"],
-    "file_extension_inventory.csv": ["extension", "file_count"],
-    "largest_files.csv": [
-        "filename_from_xml", "filesize_from_xml_mb", "extension_from_filename", "mimetype_from_xml"
-    ],
-    "modification_year_summary.csv": ["modified_year_from_xml", "activity_count"],
-    "activity_age_summary.csv": ["activity_age_band", "activity_count"],
-}
-
-
-def atomic_write_text(path: Path, content: str) -> None:
-    """Write text completely before replacing the destination."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp")
-    try:
-        temp_path.write_text(content, encoding="utf-8")
-        temp_path.replace(path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-
-def write_json(path: Path, value: Any) -> None:
-    atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False) + "\n")
-
-
-def write_csv(path: Path, rows: List[Dict[str, Any]], minimum_fields: Optional[List[str]] = None) -> None:
-    minimum_fields = minimum_fields or CSV_MINIMUM_FIELDS.get(path.name, [])
-    discovered_fields = sorted({key for row in rows for key in row.keys()})
-    fieldnames = list(dict.fromkeys([*minimum_fields, *discovered_fields]))
-    if not fieldnames:
-        atomic_write_text(path, "")
+def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
         return
 
-    temp_path = path.with_name(f".{path.name}.tmp")
-    try:
-        with temp_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(rows)
-        temp_path.replace(path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
+    fieldnames = sorted({key for row in rows for key in row.keys()})
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def flatten_course_summary(data: Dict[str, Any], source_name: str, archive_type: str, output_folder: str = "") -> Dict[str, Any]:
     summary = data.get("summary", {})
     row = {
-        "schema_name": SCHEMA_NAME,
-        "schema_version": SCHEMA_VERSION,
-        "generator_version": TOOL_VERSION,
         "source_backup": source_name,
         "output_folder": output_folder,
         "archive_type": archive_type,
@@ -1027,6 +1469,15 @@ def flatten_course_summary(data: Dict[str, Any], source_name: str, archive_type:
         "external_domain_count_from_xml": summary.get("external_domain_count_from_xml", 0),
         "total_book_chapter_count_from_xml": summary.get("total_book_chapter_count_from_xml", 0),
         "total_xml_text_word_count_estimate": summary.get("total_xml_text_word_count_estimate", 0),
+        "content_inventory_item_count": summary.get("content_inventory_item_count", 0),
+        "content_placement_count": summary.get("content_placement_count", 0),
+        "moodle_hosted_video_count": summary.get("moodle_hosted_video_count", 0),
+        "moodle_hosted_video_size_mb": summary.get("moodle_hosted_video_size_mb", 0),
+        "panopto_video_reference_count": summary.get("panopto_video_reference_count", 0),
+        "panopto_unique_video_count": summary.get("panopto_unique_video_count", 0),
+        "other_external_video_reference_count": summary.get("other_external_video_reference_count", 0),
+        "other_external_unique_video_count": summary.get("other_external_unique_video_count", 0),
+        "content_items_requiring_review": summary.get("content_items_requiring_review", 0),
     }
 
     for activity_type, count in summary.get("activity_type_counts_from_xml", {}).items():
@@ -1204,6 +1655,22 @@ def write_text_report(path: Path, data: Dict[str, Any], source_name: str, archiv
         lines.append("No hidden activities detected from module.xml visible=0.")
 
     lines.append("")
+    lines.append("MEDIA AND CONTENT INVENTORY")
+    lines.append("-" * 27)
+    lines.append(f"Content inventory items: {summary.get('content_inventory_item_count', 0)}")
+    lines.append(f"Moodle-hosted videos: {summary.get('moodle_hosted_video_count', 0)}")
+    lines.append(f"Moodle-hosted video storage (MB): {summary.get('moodle_hosted_video_size_mb', 0)}")
+    lines.append(f"Panopto video references: {summary.get('panopto_video_reference_count', 0)}")
+    lines.append(f"Other external video references: {summary.get('other_external_video_reference_count', 0)}")
+    lines.append(f"Items requiring review or with unresolved location: {summary.get('content_items_requiring_review', 0)}")
+    for row in sorted(data.get("video_inventory", []), key=lambda x: float(x.get("size_mb") or 0), reverse=True)[:20]:
+        lines.append(
+            f"{row.get('filename_or_title', '')} | hosting={row.get('hosting_type', '')} | "
+            f"size_mb={row.get('size_mb', '')} | section={row.get('section_number', '')} | "
+            f"activity={row.get('activity_name', '')} | association={row.get('association_status', '')}"
+        )
+
+    lines.append("")
     lines.append("EXTERNAL DEPENDENCY INVENTORY")
     lines.append("-" * 29)
     for e in data.get("external_dependency_inventory", [])[:20]:
@@ -1258,9 +1725,11 @@ def write_text_report(path: Path, data: Dict[str, Any], source_name: str, archiv
     lines.append("All reported values are derived from Moodle backup XML files.")
     lines.append("Counts for links, iframes, images, and word estimates refer only to content stored directly in XML fields.")
     lines.append("Uploaded file contents are not opened or scanned.")
+    lines.append("Content categories and providers are deterministic classifications derived from MIME types, extensions, HTML elements, URLs, and Moodle components.")
+    lines.append("External references indicate presence in the backup, not current availability or permissions.")
     lines.append("No quality score, risk score, severity score, or pedagogic rating is generated.")
 
-    atomic_write_text(path, "\n".join(lines) + "\n")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, archive_type: str) -> None:
@@ -1435,6 +1904,29 @@ def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, ar
     lines.append(markdown_table(hidden_rows, ["Section", "Section name", "Type", "Activity", "Modified"]) if hidden_rows else "_No hidden activities detected from module.xml visible=0._")
     lines.append("")
 
+    lines.append("## Media and Content Inventory")
+    lines.append("")
+    media_summary_rows = [
+        ["Content inventory items", summary.get("content_inventory_item_count", 0)],
+        ["Moodle-hosted videos", summary.get("moodle_hosted_video_count", 0)],
+        ["Moodle-hosted video storage (MB)", summary.get("moodle_hosted_video_size_mb", 0)],
+        ["Panopto video references", summary.get("panopto_video_reference_count", 0)],
+        ["Other external video references", summary.get("other_external_video_reference_count", 0)],
+        ["Review or unresolved items", summary.get("content_items_requiring_review", 0)],
+    ]
+    lines.append(markdown_table(media_summary_rows, ["Metric", "Value"]))
+    lines.append("")
+    video_rows = []
+    for record in sorted(data.get("video_inventory", []), key=lambda x: float(x.get("size_mb") or 0), reverse=True)[:25]:
+        video_rows.append([
+            record.get("hosting_type", ""), record.get("filename_or_title", ""),
+            record.get("size_mb", ""), record.get("section_number", ""),
+            record.get("activity_name", ""), record.get("association_status", ""),
+            record.get("classification_confidence", ""),
+        ])
+    lines.append(markdown_table(video_rows, ["Hosting", "File/title", "Size MB", "Section", "Activity", "Association", "Confidence"]) if video_rows else "_No video items detected._")
+    lines.append("")
+
     lines.append("## 13. External Dependency Inventory")
     lines.append("")
     dependency_rows = []
@@ -1507,44 +1999,38 @@ def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, ar
     lines.append("- This report is intentionally limited to Moodle backup XML metadata.")
     lines.append("- Link, iframe, image-tag, and word-count estimates are based only on HTML-like content stored directly inside XML fields.")
     lines.append("- Uploaded file contents are not opened or scanned.")
+    lines.append("- Content categories and providers are deterministic classifications derived from MIME types, extensions, HTML elements, URLs, and Moodle components.")
+    lines.append("- External references establish that a URL was stored in the backup; they do not test current availability or permissions.")
     lines.append("- No pedagogic judgement, quality score, risk score, or severity score is generated.")
     lines.append("- CSV and JSON outputs retain explicit `_from_xml` field names for machine-readable clarity.")
     lines.append("")
 
-    atomic_write_text(path, "\n".join(lines) + "\n")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def process_single_mbz(
-    mbz_path: Path,
-    output_dir: Path,
-    keep_extracted: bool = False,
-    as_of: Optional[dt.datetime] = None,
-    max_archive_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
-    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-) -> Dict[str, Any]:
+def process_single_mbz(mbz_path: Path, output_dir: Path, keep_extracted: bool = False) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         extract_dir = Path(tmp) / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
 
-        archive_type = extract_mbz(
-            mbz_path,
-            extract_dir,
-            max_members=max_archive_members,
-            max_uncompressed_bytes=max_uncompressed_bytes,
-        )
-        data = audit_course(extract_dir, as_of=as_of)
-        data["source"] = {
-            "backup_filename": mbz_path.name,
-            "archive_type": archive_type,
-            "backup_size_bytes": mbz_path.stat().st_size,
-        }
+        archive_type = extract_mbz(mbz_path, extract_dir)
+        data = audit_course(extract_dir)
 
-        write_json(output_dir / "audit_data.json", data)
+        (output_dir / "audit_data.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         write_csv(output_dir / "sections.csv", data["sections"])
         write_csv(output_dir / "activities.csv", data["activities"])
         write_csv(output_dir / "files.csv", data["files"])
+        write_csv(output_dir / "content_inventory.csv", data["content_inventory"])
+        write_csv(output_dir / "video_inventory.csv", data["video_inventory"])
+        write_csv(output_dir / "audio_inventory.csv", data["audio_inventory"])
+        write_csv(output_dir / "document_inventory.csv", data["document_inventory"])
+        write_csv(output_dir / "interactive_content_inventory.csv", data["interactive_content_inventory"])
+        write_csv(output_dir / "external_media_inventory.csv", data["external_media_inventory"])
+        write_csv(output_dir / "content_category_summary.csv", data["content_category_summary"])
+        write_csv(output_dir / "hosting_summary.csv", data["hosting_summary"])
+        write_csv(output_dir / "content_placement_inventory.csv", data["content_placement_inventory"])
         write_csv(output_dir / "section_activity_breakdown.csv", data["section_activity_breakdown"])
         write_csv(output_dir / "book_inventory.csv", data["book_inventory"])
         write_csv(output_dir / "duplicate_activity_inventory.csv", data["duplicate_activity_inventory"])
@@ -1571,15 +2057,7 @@ def process_single_mbz(
     return summary_row
 
 
-def run_batch(
-    input_dir: Path,
-    output_dir: Path,
-    recursive: bool = False,
-    keep_extracted: bool = False,
-    as_of: Optional[dt.datetime] = None,
-    max_archive_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
-    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-) -> int:
+def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_extracted: bool = False) -> None:
     mbz_files = find_mbz_files(input_dir, recursive=recursive)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1602,14 +2080,7 @@ def run_batch(
         print(f"[{index}/{len(mbz_files)}] Auditing XML metadata: {mbz_path.name}")
 
         try:
-            summary_row = process_single_mbz(
-                mbz_path,
-                course_output_dir,
-                keep_extracted=keep_extracted,
-                as_of=as_of,
-                max_archive_members=max_archive_members,
-                max_uncompressed_bytes=max_uncompressed_bytes,
-            )
+            summary_row = process_single_mbz(mbz_path, course_output_dir, keep_extracted=keep_extracted)
             combined_rows.append(summary_row)
             log_rows.append({
                 "source_backup": mbz_path.name,
@@ -1636,9 +2107,7 @@ def run_batch(
     print(f"- {output_dir / 'combined_course_summary.csv'}")
     print(f"- {output_dir / 'batch_run_log.csv'}")
     print(f"Courses processed successfully: {len(combined_rows)}")
-    failed_count = sum(1 for row in log_rows if row["status"] == "failed")
-    print(f"Courses failed: {failed_count}")
-    return failed_count
+    print(f"Courses failed: {sum(1 for row in log_rows if row['status'] == 'failed')}")
 
 
 def main() -> None:
@@ -1651,32 +2120,10 @@ def main() -> None:
     parser.add_argument("--batch", action="store_true", help="Process all .mbz files in the input folder")
     parser.add_argument("--recursive", action="store_true", help="In batch mode, search subfolders recursively for .mbz files")
     parser.add_argument("--keep-extracted", action="store_true", help="Keep extracted backup files in each output folder")
-    parser.add_argument(
-        "--as-of",
-        type=parse_as_of,
-        help="ISO date/datetime used for activity-age bands. Defaults to the current local time.",
-    )
-    parser.add_argument(
-        "--max-archive-members",
-        type=int,
-        default=DEFAULT_MAX_ARCHIVE_MEMBERS,
-        help=f"Maximum archive members allowed during extraction (default: {DEFAULT_MAX_ARCHIVE_MEMBERS:,}).",
-    )
-    parser.add_argument(
-        "--max-uncompressed-gb",
-        type=float,
-        default=DEFAULT_MAX_UNCOMPRESSED_BYTES / (1024 ** 3),
-        help="Maximum estimated uncompressed archive size in GiB (default: 20).",
-    )
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
-    if args.max_archive_members <= 0:
-        parser.error("--max-archive-members must be greater than zero.")
-    if args.max_uncompressed_gb <= 0:
-        parser.error("--max-uncompressed-gb must be greater than zero.")
-    max_uncompressed_bytes = int(args.max_uncompressed_gb * (1024 ** 3))
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input not found: {input_path}")
@@ -1684,17 +2131,7 @@ def main() -> None:
     if args.batch:
         if not input_path.is_dir():
             raise ValueError("--batch requires input to be a folder containing .mbz files.")
-        failed_count = run_batch(
-            input_path,
-            output_dir,
-            recursive=args.recursive,
-            keep_extracted=args.keep_extracted,
-            as_of=args.as_of,
-            max_archive_members=args.max_archive_members,
-            max_uncompressed_bytes=max_uncompressed_bytes,
-        )
-        if failed_count:
-            raise SystemExit(1)
+        run_batch(input_path, output_dir, recursive=args.recursive, keep_extracted=args.keep_extracted)
         return
 
     if input_path.is_dir():
@@ -1703,14 +2140,7 @@ def main() -> None:
     if input_path.suffix.lower() != ".mbz":
         raise ValueError("Input file must have a .mbz extension.")
 
-    process_single_mbz(
-        input_path,
-        output_dir,
-        keep_extracted=args.keep_extracted,
-        as_of=args.as_of,
-        max_archive_members=args.max_archive_members,
-        max_uncompressed_bytes=max_uncompressed_bytes,
-    )
+    process_single_mbz(input_path, output_dir, keep_extracted=args.keep_extracted)
 
     print(f"XML metadata audit complete: {output_dir}")
     print(f"- {output_dir / 'audit_report.md'}")
@@ -1732,6 +2162,15 @@ def main() -> None:
     print(f"- {output_dir / 'activities.csv'}")
     print(f"- {output_dir / 'sections.csv'}")
     print(f"- {output_dir / 'files.csv'}")
+    print(f"- {output_dir / 'content_inventory.csv'}")
+    print(f"- {output_dir / 'video_inventory.csv'}")
+    print(f"- {output_dir / 'audio_inventory.csv'}")
+    print(f"- {output_dir / 'document_inventory.csv'}")
+    print(f"- {output_dir / 'interactive_content_inventory.csv'}")
+    print(f"- {output_dir / 'external_media_inventory.csv'}")
+    print(f"- {output_dir / 'content_category_summary.csv'}")
+    print(f"- {output_dir / 'hosting_summary.csv'}")
+    print(f"- {output_dir / 'content_placement_inventory.csv'}")
     print(f"- {output_dir / 'audit_data.json'}")
 
 

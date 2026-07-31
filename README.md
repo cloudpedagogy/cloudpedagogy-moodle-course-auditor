@@ -41,13 +41,16 @@ The auditor is deliberately conservative. It reports what can be supported by th
 
 ### Interactive data visualisation
 
-- Course overview cards.
-- Activity-type and section visualisations.
+- Headline course, activity, file and storage totals.
+- Activity-type and section distributions.
 - Moodle Book inventories and chapter summaries.
-- File type, size and storage-footprint visualisations.
-- External dependency summaries.
-- Hidden-content summaries.
-- Activity-age visualisations.
+- File-format, largest-file and storage-footprint views.
+- Moodle-hosted video counts and storage use.
+- Unique Panopto and other external-video references.
+- Hosting/provider and content-format breakdowns.
+- External-domain and dependency summaries.
+- Hidden-content and activity-age views.
+- A filterable content inventory with hosting, provider, confidence and review information.
 - Responsive, standalone HTML output with no web server required.
 
 The dashboard adapts to the audit data available. For example, a course without Moodle Books omits Book-specific charts while retaining the rest of the dashboard.
@@ -71,21 +74,22 @@ The backup should include the course activities, resources and content required 
 
 ## Recommended Moodle backup settings
 
-Include:
+Create a normal Moodle `.mbz` backup, not an IMS Common Cartridge export.
 
-- Activities and resources
-- Question bank
-- Content
+Select:
 
-For backups processed outside their original Moodle environment, normally exclude the following unless they are specifically required and you are authorised to process them:
+- Activities and resources — essential for course structure, activities, Books, links and embedded-content analysis.
+- Blocks — provides a more complete record of course configuration.
+- Files — essential for file counts, storage analysis and Moodle-hosted video detection.
+- Filters — preserves relevant content-processing and embedding configuration.
+- Custom fields — retains useful course and activity metadata.
+- Content bank content — important when H5P or content-bank items are used.
+- Legacy course files — allows older stored files to be included in the inventory.
+- Question bank — optional; select it if question metadata is required.
 
-- Enrolled users
-- User files
-- Activity logs
-- Grades
-- Other personally identifiable information
+Normally leave IMS Common Cartridge, enrolled users, user roles, comments, badges, calendar events, completion details, logs, grade history, groups and user state unselected. On **Schema settings**, retain every section and activity that should appear in the audit.
 
-Use the minimum data required for the audit and follow your institution's data-protection, retention and information-governance requirements.
+Different selections should not normally break the auditor, but excluded content cannot be analysed. Excluding files can produce incomplete file/storage results and an apparent zero Moodle-hosted-video count. See [`MOODLE_BACKUP_INSTRUCTIONS.md`](MOODLE_BACKUP_INSTRUCTIONS.md) for the complete settings table and step-by-step guidance.
 
 ---
 
@@ -119,8 +123,9 @@ Use the minimum data required for the audit and follow your institution's data-p
 
 - External links and domains
 - iframe usage
-- webCAL references
-- Panopto references
+- External interactive content and its provider domain
+- Panopto and other external-video references
+- Unique content references and their placements where supported
 
 ### Files and storage
 
@@ -131,6 +136,8 @@ Use the minimum data required for the audit and follow your institution's data-p
 - File sizes
 - Largest files
 - Overall course footprint
+- Moodle-hosted video count and storage
+- Content type, format, hosting location, provider and confidence classification
 
 ### Questions
 
@@ -169,6 +176,10 @@ The platform does not automatically:
 - Prove that a learner completed or understood an activity.
 
 XML word counts are estimates of text represented in the backup, not exact measures of learner-facing reading load. Modification dates indicate recorded Moodle changes, not necessarily the intellectual age or currency of the material.
+
+Results describe the evidence included in the backup, not necessarily everything present in the live course. A zero can mean either that no matching content was found or that the relevant files, activities, question bank or content-bank data were excluded. Unusual third-party plugins may use structures the auditor does not recognise.
+
+External URLs are identified from metadata but are not availability-tested. Provider/reference counts should not be interpreted as numbers of unique videos unless explicitly labelled as unique. Review flags indicate uncertain or conflicting metadata requiring human checking; they are not proof of an error or risk.
 
 ---
 
@@ -322,6 +333,12 @@ The exact set of files may vary according to the course data, auditor version an
 - `activities.csv`
 - `sections.csv`
 - `files.csv`
+- `content_inventory.csv`
+- `content_placements.csv`
+- `content_type_summary.csv`
+- `content_hosting_summary.csv`
+- `content_provider_summary.csv`
+- `content_review_summary.csv`
 - `audit_data.json`
 
 Batch processing additionally creates:
@@ -334,6 +351,8 @@ Batch processing additionally creates:
 - `dashboard.html`
 
 This is a standalone interactive report. It does not require a running Python process or a live Moodle connection after generation. Whether the report requires internet access depends on whether Plotly JavaScript is embedded, loaded locally or loaded from a content-delivery network. Use the dashboard generator's `--help` output to check the options available in your version.
+
+The dashboard visualises the generated audit data; it does not perform a second independent analysis. Depending on the available data, it can show course structure, activity composition, visible and hidden content, Moodle Books, file formats, largest files, total storage, Moodle-hosted videos, unique Panopto and other external-video references, hosting locations, providers, external domains, content formats, placements, confidence, review items and activity age. Panels without supporting data are omitted, so dashboards for different courses may contain different charts.
 
 ---
 
@@ -437,8 +456,8 @@ MIT License
 
 ## Disclaimer
 
-CloudPedagogy Moodle Course Auditor provides factual reports derived from Moodle backup metadata.
+CloudPedagogy Moodle Course Auditor provides evidence-based reports derived from the contents and metadata included in a Moodle backup. Reasonable care is taken in classification, but results may be incomplete or occasionally misclassified because Moodle versions, plugins, backup selections and metadata conventions vary.
 
 The dashboard visualises the structured audit outputs. It does not independently establish pedagogic effectiveness, accessibility compliance, course quality or learner achievement.
 
-The software supports institutional review and decision-making but does not replace academic judgement, learning-design review, accessibility testing, quality-assurance procedures, data-protection review or Moodle administration.
+Outputs should be checked against the source course before consequential decisions are made. The software supports institutional review and decision-making but does not replace academic judgement, learning-design review, accessibility testing, quality-assurance procedures, data-protection review or Moodle administration.
