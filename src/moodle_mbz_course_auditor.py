@@ -3,7 +3,7 @@
 Moodle MBZ XML Metadata Auditor
 ===============================
 
-Version: 2.3
+Version: 2.4
 
 Audits Moodle course backup files (.mbz) using XML metadata only.
 
@@ -15,7 +15,11 @@ Supports:
     python3 moodle_mbz_course_auditor.py course.mbz
 
 - Batch mode across a folder of MBZ files:
-    python3 moodle_mbz_course_auditor.py input_folder --batch --output output_folder
+    python3 moodle_mbz_course_auditor.py input_folder --batch --output-dir output_folder
+
+Batch output folders retain the Moodle course ID, recognisable course name/year,
+and backup timestamp where these are present in the source filename. Existing
+results are preserved by default by adding a numeric suffix.
 
 Archive formats supported:
 - gzip-compressed tar archives (.mbz, common in Moodle)
@@ -80,6 +84,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
@@ -291,11 +296,25 @@ def extract_mbz(mbz_path: Path, extract_dir: Path) -> str:
     raise RuntimeError("Unsupported archive format. Expected .mbz as zip, tar, or tar.gz.")
 
 
-def safe_folder_name(name: str, max_length: int = 120) -> str:
+def safe_folder_name(name: str, max_length: int = 160) -> str:
+    """Return a portable folder name without discarding useful backup identity."""
     name = Path(name).stem
     name = re.sub(r"[^\w\-\.]+", "_", name)
     name = re.sub(r"_+", "_", name).strip("_")
     return name[:max_length] or "moodle_backup"
+
+
+def course_run_folder_name(name: str) -> str:
+    """Create a concise but traceable folder name from a Moodle backup filename.
+
+    Example:
+      backup-moodle2-course-5729-lshtm_2489_2025-20260731-2245-nu.mbz
+      -> 5729-lshtm_2489_2025-20260731-2245
+    """
+    stem = Path(name).stem
+    stem = re.sub(r"^backup-moodle2-course-", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"-nu$", "", stem, flags=re.IGNORECASE)
+    return safe_folder_name(stem)
 
 
 def find_mbz_files(input_path: Path, recursive: bool = False) -> List[Path]:
@@ -2057,7 +2076,13 @@ def process_single_mbz(mbz_path: Path, output_dir: Path, keep_extracted: bool = 
     return summary_row
 
 
-def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_extracted: bool = False) -> None:
+def run_batch(
+    input_dir: Path,
+    output_dir: Path,
+    recursive: bool = False,
+    keep_extracted: bool = False,
+    existing: str = "suffix",
+) -> Tuple[int, int, int]:
     mbz_files = find_mbz_files(input_dir, recursive=recursive)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2068,33 +2093,59 @@ def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_e
     log_rows: List[Dict[str, Any]] = []
 
     for index, mbz_path in enumerate(mbz_files, start=1):
-        folder_name = safe_folder_name(mbz_path.name)
+        started_at = dt.datetime.now().astimezone()
+        timer_started = time.monotonic()
+        folder_name = course_run_folder_name(mbz_path.name)
         course_output_dir = output_dir / folder_name
 
         if course_output_dir.exists():
-            suffix = 2
-            while (output_dir / f"{folder_name}_{suffix}").exists():
-                suffix += 1
-            course_output_dir = output_dir / f"{folder_name}_{suffix}"
+            if existing == "skip":
+                log_rows.append({
+                    "source_backup": mbz_path.name,
+                    "source_path": str(mbz_path),
+                    "output_folder": str(course_output_dir),
+                    "status": "skipped",
+                    "started_at": started_at.isoformat(timespec="seconds"),
+                    "finished_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "duration_seconds": 0,
+                    "message": "Output folder already exists.",
+                })
+                print(f"[{index}/{len(mbz_files)}] Skipping existing result: {mbz_path.name}")
+                continue
+            if existing == "overwrite":
+                shutil.rmtree(course_output_dir)
+            else:
+                suffix = 2
+                while (output_dir / f"{folder_name}_{suffix}").exists():
+                    suffix += 1
+                course_output_dir = output_dir / f"{folder_name}_{suffix}"
 
         print(f"[{index}/{len(mbz_files)}] Auditing XML metadata: {mbz_path.name}")
 
         try:
             summary_row = process_single_mbz(mbz_path, course_output_dir, keep_extracted=keep_extracted)
             combined_rows.append(summary_row)
+            finished_at = dt.datetime.now().astimezone()
             log_rows.append({
                 "source_backup": mbz_path.name,
                 "source_path": str(mbz_path),
                 "output_folder": str(course_output_dir),
                 "status": "success",
+                "started_at": started_at.isoformat(timespec="seconds"),
+                "finished_at": finished_at.isoformat(timespec="seconds"),
+                "duration_seconds": round(time.monotonic() - timer_started, 2),
                 "message": "",
             })
         except Exception as exc:
+            finished_at = dt.datetime.now().astimezone()
             log_rows.append({
                 "source_backup": mbz_path.name,
                 "source_path": str(mbz_path),
                 "output_folder": str(course_output_dir),
                 "status": "failed",
+                "started_at": started_at.isoformat(timespec="seconds"),
+                "finished_at": finished_at.isoformat(timespec="seconds"),
+                "duration_seconds": round(time.monotonic() - timer_started, 2),
                 "message": str(exc),
             })
             print(f"  FAILED: {mbz_path.name} — {exc}")
@@ -2107,19 +2158,35 @@ def run_batch(input_dir: Path, output_dir: Path, recursive: bool = False, keep_e
     print(f"- {output_dir / 'combined_course_summary.csv'}")
     print(f"- {output_dir / 'batch_run_log.csv'}")
     print(f"Courses processed successfully: {len(combined_rows)}")
-    print(f"Courses failed: {sum(1 for row in log_rows if row['status'] == 'failed')}")
+    failed_count = sum(1 for row in log_rows if row["status"] == "failed")
+    skipped_count = sum(1 for row in log_rows if row["status"] == "skipped")
+    print(f"Courses failed: {failed_count}")
+    print(f"Courses skipped: {skipped_count}")
+    return len(combined_rows), failed_count, skipped_count
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Audit Moodle .mbz course backups using XML metadata only.")
     parser.add_argument(
         "input",
         help="Path to a single Moodle .mbz backup file, or a folder containing .mbz files when --batch is used.",
     )
-    parser.add_argument("--output", "-o", default="moodle_audit_output", help="Output folder")
+    parser.add_argument(
+        "--output", "--output-dir", "-o",
+        dest="output",
+        default="moodle_audit_output",
+        help="Output folder (default: moodle_audit_output)",
+    )
     parser.add_argument("--batch", action="store_true", help="Process all .mbz files in the input folder")
     parser.add_argument("--recursive", action="store_true", help="In batch mode, search subfolders recursively for .mbz files")
     parser.add_argument("--keep-extracted", action="store_true", help="Keep extracted backup files in each output folder")
+    parser.add_argument(
+        "--existing",
+        choices=("suffix", "skip", "overwrite"),
+        default="suffix",
+        help=("Batch handling when a result folder exists: create a numbered suffix "
+              "(default), skip it, or overwrite it"),
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
@@ -2131,8 +2198,14 @@ def main() -> None:
     if args.batch:
         if not input_path.is_dir():
             raise ValueError("--batch requires input to be a folder containing .mbz files.")
-        run_batch(input_path, output_dir, recursive=args.recursive, keep_extracted=args.keep_extracted)
-        return
+        _, failed_count, _ = run_batch(
+            input_path,
+            output_dir,
+            recursive=args.recursive,
+            keep_extracted=args.keep_extracted,
+            existing=args.existing,
+        )
+        return 1 if failed_count else 0
 
     if input_path.is_dir():
         raise ValueError("Input is a folder. Use --batch to process a folder of .mbz files.")
@@ -2172,7 +2245,8 @@ def main() -> None:
     print(f"- {output_dir / 'hosting_summary.csv'}")
     print(f"- {output_dir / 'content_placement_inventory.csv'}")
     print(f"- {output_dir / 'audit_data.json'}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
