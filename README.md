@@ -39,7 +39,7 @@ The platform generates structured audit datasets, an interactive dashboard and, 
 The auditor extracts structured information from the Moodle `.mbz` backup and generates CSV, JSON, Markdown and text files for further analysis.
 
 <p align="center">
-  <img src="img/audit.png" alt="Generated Moodle audit datasets" width="800">
+  <img src="img/audit.png" alt="Generated Moodle audit datasets" width="600">
 </p>
 
 <p align="center"><em>Generated audit datasets available for further analysis.</em></p>
@@ -71,7 +71,7 @@ The following images are sample screenshots from the automatically generated int
 When optional file extraction is enabled, Moodle-hosted resources—such as PDFs, Word documents, presentations, images and videos—are reconstructed in organised folders.
 
 <p align="center">
-  <img src="img/extracted_files.png" alt="Extracted Moodle course resources" width="800">
+  <img src="img/extracted_files.png" alt="Extracted Moodle course resources" width="600">
 </p>
 
 <p align="center"><em>Example of Moodle-hosted files reconstructed from an MBZ backup.</em></p>
