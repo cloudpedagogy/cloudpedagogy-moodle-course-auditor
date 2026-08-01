@@ -12,6 +12,7 @@ The platform supports:
 - storage and large-file analysis;
 - detection of Moodle-hosted and externally hosted video;
 - external-platform dependency review;
+- review of explicit course- and activity-level role capability overrides and recorded enrolment methods;
 - identification of hidden, old or potentially duplicated content;
 - recovery or migration of Moodle-hosted files when explicitly requested.
 
@@ -86,16 +87,16 @@ Recommended project structure:
 
 ```text
 repository/
-â”œâ”€â”€ README.md
-â”œâ”€â”€ HANDBOOK.md
-â”œâ”€â”€ requirements.txt
-â”œâ”€â”€ src/
-â”‚   â”œâ”€â”€ batch_audit.py
-â”‚   â”œâ”€â”€ moodle_mbz_course_auditor.py
-â”‚   â”œâ”€â”€ moodle_dashboard_generator.py
-â”‚   â””â”€â”€ extract_moodle_files.py
-â”œâ”€â”€ batch_input/
-â””â”€â”€ batch_output/
+|-- README.md
+|-- HANDBOOK.md
+|-- requirements.txt
+|-- src/
+|   |-- batch_audit.py
+|   |-- moodle_mbz_course_auditor.py
+|   |-- moodle_dashboard_generator.py
+|   `-- extract_moodle_files.py
+|-- batch_input/
+`-- batch_output/
 ```
 
 On macOS or Linux:
@@ -245,16 +246,16 @@ Using only `5729` would be less useful to staff and could confuse separate backu
 
 ```text
 batch_output/
-â”œâ”€â”€ batch_summary.csv
-â””â”€â”€ <course-run>/
-    â”œâ”€â”€ audit/
-    â”‚   â”œâ”€â”€ audit_report.md
-    â”‚   â”œâ”€â”€ audit_report.txt
-    â”‚   â”œâ”€â”€ audit_data.json
-    â”‚   â””â”€â”€ CSV datasets
-    â”œâ”€â”€ dashboard.html
-    â”œâ”€â”€ processing.log
-    â””â”€â”€ extracted_files/       # optional
+|-- batch_summary.csv
+`-- <course-run>/
+    |-- audit/
+    |   |-- audit_report.md
+    |   |-- audit_report.txt
+    |   |-- audit_data.json
+    |   `-- CSV datasets
+    |-- dashboard.html
+    |-- processing.log
+    `-- extracted_files/       # optional
 ```
 
 ### Batch summary
@@ -278,6 +279,8 @@ The exact files vary by auditor version and course contents. Typical datasets in
 - `interactive_content_inventory.csv`, `external_media_inventory.csv`;
 - `external_dependency_inventory.csv`, `external_domain_inventory.csv`;
 - `hosting_summary.csv`, `content_category_summary.csv`, `content_placement_inventory.csv`;
+- `course_permissions.csv`, containing one row for each explicit role capability override found at course or activity level;
+- `course_access_summary.csv`, summarising affected contexts and roles, permission decisions, important Student restrictions and recorded enrolment methods;
 - `modification_year_summary.csv`, `activity_age_summary.csv`;
 - `audit_data.json`.
 
@@ -308,6 +311,9 @@ The dashboard is intended to make structural and technical patterns easier to di
 - Panopto and other external-video references;
 - hosting/provider/content-format summaries;
 - external domains and platform dependencies;
+- explicit course- and activity-level role capability overrides;
+- affected roles, `Allow`, `Prevent` and `Prohibit` decisions, and recorded enrolment methods;
+- dynamically worded Student-restriction prompts based on recognised Moodle capabilities;
 - content placements and items requiring review;
 - modification-age patterns;
 - filterable content-level records.
@@ -340,6 +346,32 @@ Word figures estimate text represented in Moodle XML. They do not include reliab
 
 These indicate incomplete, ambiguous or conflicting metadata that may need human checking. They are not compliance findings or risk ratings.
 
+### Course access and permissions
+
+The permissions panel reports explicit capability overrides found in the backup's course- and activity-level `roles.xml` files. Its summary shows:
+
+- the total number of explicit overrides;
+- course-level and activity-level counts;
+- the number of individual activities with overrides;
+- roles affected;
+- `Allow`, `Prevent` and `Prohibit` decisions;
+- enrolment methods recorded in `course/enrolments.xml`;
+- important Student restrictions selected for review.
+
+The expandable table retains the authoritative evidence: context, course or activity location, role, Moodle capability, permission decision and review flag.
+
+Where a recognised Student capability is explicitly set to `Prevent` or `Prohibit`, the dashboard describes the likely scope dynamically. For example, `mod/forum:...` restrictions are described as affecting forum participation, quiz capabilities as affecting quiz participation, and resource/file capabilities as affecting resource access. When classification is uncertain, it deliberately falls back to “course access or participation” rather than guessing.
+
+Interpret Moodle decisions carefully:
+
+- `Allow` explicitly grants a capability at that context;
+- `Prevent` denies it at that context but can normally be overridden by an `Allow` in a more specific lower context;
+- `Prohibit` is a stronger denial that normally cannot be overridden lower in the context hierarchy.
+
+This analysis is useful for detecting unexpected restrictions, understanding why an activity behaves differently from institutional defaults, reviewing locally customised roles before rollover or redesign, comparing backups, and supporting Moodle troubleshooting. A flagged restriction is a prompt for review, not proof of an error.
+
+The panel is not a complete permission matrix and does not calculate the effective permission of every user. Capabilities not listed continue to inherit Moodle's site-level role configuration. Site role definitions, role assignments, group membership and other wider configuration may be absent from the `.mbz`.
+
 ## 13. Limitations and accuracy
 
 The platform analyses Moodle backup XML and file metadata. It does not open and semantically interpret uploaded PDFs, Word files, slides, images, audio/video, SCORM packages or H5P packages.
@@ -353,8 +385,11 @@ It cannot by itself determine:
 - copyright/licensing compliance;
 - whether a learner accessed, completed or understood content;
 - whether an external service or link is still available.
+- every user's effective Moodle permissions or the complete site-level permission matrix.
 
 Findings depend on the Moodle version, installed plugins, backup selections and metadata conventions. Third-party activity types may not be completely recognised. Results should be checked against the live course before consequential action.
+
+Permission findings represent explicit overrides and enrolment information stored in the backup at the time it was created. They do not reconstruct inherited role definitions, every role assignment, or wider site configuration. A zero override count means that no explicit override was found in the parsed backup evidence; it does not mean that every user has unrestricted access.
 
 ## 14. Data protection and governance
 
@@ -437,10 +472,12 @@ For each course:
 3. Review the dashboard for broad structural patterns.
 4. Inspect Moodle-hosted video and large-file findings.
 5. Review external platforms and domain dependencies.
-6. Examine hidden, old and potentially duplicated items in context.
-7. Use CSV inventories for detailed follow-up.
-8. Validate important findings against the live course.
-9. Record agreed actions, owners and review dates outside the audit output.
+6. Review explicit course and activity permission overrides for unexpected restrictions or locally customised roles.
+7. Confirm important access findings against Moodle's live role and enrolment configuration.
+8. Examine hidden, old and potentially duplicated items in context.
+9. Use CSV inventories for detailed follow-up.
+10. Validate other important findings against the live course.
+11. Record agreed actions, owners and review dates outside the audit output.
 
 The audit provides evidence for a professional conversation; it is not itself a formal approval or remediation workflow.
 

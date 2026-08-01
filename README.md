@@ -22,6 +22,7 @@ The auditor is deliberately conservative: it reports evidence contained in the b
 - Analyse files, formats, sizes, storage footprint and largest files.
 - Distinguish Moodle-hosted video from Panopto and other external-video references.
 - Detect external links, domains, iframes and other platform dependencies.
+- Report explicit course- and activity-level role capability overrides, together with enrolment methods recorded in the backup.
 - Generate CSV, JSON, Markdown and text outputs.
 - Generate a responsive standalone Plotly dashboard.
 - Optionally export actual Moodle-hosted files into organised folders.
@@ -139,6 +140,8 @@ Create a normal Moodle `.mbz` backup rather than an IMS Common Cartridge export.
 - question bank if question analysis is required.
 
 Normally exclude enrolled users, user roles, comments, badges, calendar events, logs, grade history, completion details and other user data unless there is a specific authorised reason to include them. Keep every section and activity that should appear in the audit on the Schema settings page.
+
+Excluding individual user role assignments does not prevent the auditor from reporting high-level capability overrides saved in course- and activity-level `roles.xml` files. The permissions analysis does not require learner identities.
 
 Excluded material cannot be analysed. In particular, excluding files can result in incomplete storage figures and an apparent zero Moodle-hosted-video count.
 
@@ -258,11 +261,25 @@ Depending on the available audit data, the dashboard can show:
 - unique Panopto and other external-video references;
 - hosting locations, providers and content formats;
 - external domains and dependencies;
+- explicit course- and activity-level role capability overrides, including `Allow`, `Prevent` and `Prohibit` decisions;
+- roles affected and enrolment methods recorded in the backup;
+- dynamically worded Student-restriction prompts derived from recognised capability names;
 - content placements, confidence and review items;
 - activity modification-age summaries;
 - a filterable content inventory.
 
 Panels without supporting data may be omitted. The dashboard visualises the audit outputs; it does not perform a separate analysis.
+
+### Permission outputs
+
+The permissions feature creates two datasets:
+
+- `course_permissions.csv` — one row per explicit capability override, including its context, role, capability, decision and review flag;
+- `course_access_summary.csv` — summary counts for course-level and activity-level overrides, affected roles, `Allow`/`Prevent`/`Prohibit` decisions, important Student restrictions and enrolment methods.
+
+The dashboard's **Course access and permissions** panel provides a compact overview and an expandable evidence table. When recognised Student capabilities are explicitly restricted, its warning is derived dynamically from those capabilities—for example, forum participation, quiz participation or resource access. Unrecognised or mixed uncertain cases use a conservative generic description.
+
+These findings are particularly useful for identifying unexpected participation restrictions, explaining behaviour that differs from Moodle defaults, reviewing local role customisation before rollover or redesign, comparing course configurations, and supporting troubleshooting. They should always be interpreted with the live Moodle configuration when decisions are consequential.
 
 ## Limitations
 
@@ -277,6 +294,8 @@ It does not automatically:
 - generate compliance, risk or severity ratings.
 
 Results describe only the evidence included in the backup. A zero may mean either that no matching content was found or that the relevant data was excluded. Unusual third-party plugins may use structures the auditor does not recognise. XML word counts and modification ages must be interpreted as indicators, not definitive measures of learner workload or content currency.
+
+Permission findings represent explicit role capability overrides and enrolment information stored in the course backup. They are not a complete Moodle permission matrix. Capabilities not listed normally inherit site-level role definitions and wider Moodle configuration, which may not be included in the `.mbz`. `Prevent` and `Prohibit` also have different Moodle inheritance behaviour; the dashboard reports the recorded decision but does not simulate every effective permission for every user.
 
 ## Data protection
 

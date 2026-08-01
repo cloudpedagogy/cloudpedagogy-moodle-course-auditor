@@ -26,6 +26,8 @@ Expected input:
     - course_footprint.csv
     - sections.csv
     - activities.csv
+    - course_permissions.csv
+    - course_access_summary.csv
     - book_inventory.csv
     - external_dependency_inventory.csv
     - external_domain_inventory.csv
@@ -76,6 +78,8 @@ AUDIT_FILES = {
     "course_footprint": "course_footprint.csv",
     "sections": "sections.csv",
     "activities": "activities.csv",
+    "course_permissions": "course_permissions.csv",
+    "course_access_summary": "course_access_summary.csv",
     "section_activity_breakdown": "section_activity_breakdown.csv",
     "book_inventory": "book_inventory.csv",
     "duplicate_activity_inventory": "duplicate_activity_inventory.csv",
@@ -1554,6 +1558,180 @@ def make_hidden_activity_table(data: Dict[str, Any], limit: int = 25) -> Optiona
     """
 
 
+def _summary_integer(summary: Dict[str, Any], key: str) -> int:
+    """Return a CSV summary value as an integer without failing on blanks."""
+    try:
+        return int(float(summary.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _truthy_csv_value(value: Any) -> bool:
+    """Interpret common boolean representations written to CSV."""
+    if isinstance(value, bool):
+        return value
+    return clean_label(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _student_restriction_scope(permissions: pd.DataFrame) -> Optional[str]:
+    """Describe what flagged Student restrictions affect from capability names.
+
+    Returns ``None`` when every flagged restriction cannot be classified
+    confidently. This keeps the dashboard warning accurate instead of guessing
+    from a capability's free-text description.
+    """
+    if not isinstance(permissions, pd.DataFrame) or permissions.empty:
+        return None
+    if "important_student_restriction" not in permissions.columns or "capability" not in permissions.columns:
+        return None
+
+    flagged = permissions[
+        permissions["important_student_restriction"].map(_truthy_csv_value)
+    ]
+    if flagged.empty:
+        return None
+
+    # Moodle capabilities normally begin with component/type, for example
+    # mod/forum:replypost. Only classify prefixes whose meaning is unambiguous.
+    component_scopes = {
+        "mod/forum:": ("forum participation", "forums"),
+        "mod/quiz:": ("quiz participation", "quizzes"),
+        "mod/resource:": ("resource access", "resources"),
+        "mod/folder:": ("resource access", "resources"),
+        "mod/page:": ("resource access", "resources"),
+        "mod/url:": ("resource access", "resources"),
+        "mod/book:": ("resource access", "resources"),
+        "mod/file:": ("resource access", "resources"),
+        "moodle/course:managefiles": ("resource access", "resources"),
+        "mod/assign:": ("assignment participation", "assignments"),
+        "mod/chat:": ("chat participation", "chats"),
+        "mod/choice:": ("choice participation", "choices"),
+        "mod/data:": ("database participation", "databases"),
+        "mod/feedback:": ("feedback participation", "feedback activities"),
+        "mod/glossary:": ("glossary participation", "glossaries"),
+        "mod/lesson:": ("lesson participation", "lessons"),
+        "mod/scorm:": ("SCORM participation", "SCORM activities"),
+        "mod/wiki:": ("wiki participation", "wikis"),
+        "mod/workshop:": ("workshop participation", "workshops"),
+    }
+
+    classified = []
+    for capability in flagged["capability"]:
+        value = clean_label(capability).strip().lower()
+        match = next(
+            (scope for prefix, scope in component_scopes.items() if value.startswith(prefix)),
+            None,
+        )
+        if match is None:
+            return None
+        if match not in classified:
+            classified.append(match)
+
+    if len(classified) == 1:
+        return classified[0][0]
+
+    plural_scopes = [scope[1] for scope in classified]
+    if len(plural_scopes) == 2:
+        return f"{plural_scopes[0]} and {plural_scopes[1]}"
+    return f"{', '.join(plural_scopes[:-1])} and {plural_scopes[-1]}"
+
+
+def make_permissions_section(data: Dict[str, Any]) -> Optional[str]:
+    """Build a compact permissions overview with optional expandable detail."""
+    summary_df = data.get("course_access_summary", pd.DataFrame())
+    permissions = data.get("course_permissions", pd.DataFrame())
+    if not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
+        return None
+
+    summary = first_row(summary_df)
+    metrics = [
+        ("Explicit overrides", "explicit_override_count", "Recorded in this backup"),
+        ("Course-level", "course_level_override_count", "Apply at course context"),
+        ("Activity-level", "activity_level_override_count", "Apply to individual activities"),
+        ("Activities affected", "activities_with_overrides_count", "Activities with own overrides"),
+        ("Roles affected", "roles_affected_count", "Roles with explicit overrides"),
+        ("Allow", "allow_count", "Explicitly granted"),
+        ("Prevent", "prevent_count", "May be overridden lower down"),
+        ("Prohibit", "prohibit_count", "Normally cannot be overridden lower down"),
+    ]
+    cards = []
+    for label, key, note in metrics:
+        cards.append(
+            '<div class="metric-card">'
+            f'<div class="metric-label">{safe_html(label)}</div>'
+            f'<div class="metric-value">{_summary_integer(summary, key):,}</div>'
+            f'<div class="metric-note">{safe_html(note)}</div>'
+            '</div>'
+        )
+
+    body = '<div class="metric-grid permission-metrics">' + "".join(cards) + "</div>"
+    roles = clean_label(summary.get("roles_affected", "")).strip()
+    enrolment_methods = clean_label(summary.get("enrolment_methods", "")).strip()
+    context_items = []
+    if roles:
+        context_items.append(f"<li><strong>Roles affected:</strong> {safe_html(roles)}</li>")
+    if enrolment_methods:
+        context_items.append(f"<li><strong>Enrolment methods recorded:</strong> {safe_html(enrolment_methods)}</li>")
+    if context_items:
+        body += '<ul class="permission-context">' + "".join(context_items) + "</ul>"
+
+    restriction_count = _summary_integer(summary, "important_student_restriction_count")
+    if restriction_count:
+        restriction_scope = _student_restriction_scope(permissions)
+        affected_wording = restriction_scope or "course access or participation"
+        body += (
+            '<div class="review-notice">'
+            f'<strong>Review suggested:</strong> {restriction_count:,} explicit Student restriction'
+            f'{"s" if restriction_count != 1 else ""} affect {safe_html(affected_wording)}. '
+            'This is a review prompt, not an automatic error judgement.'
+            '</div>'
+        )
+
+    if isinstance(permissions, pd.DataFrame) and not permissions.empty:
+        df = permissions.copy()
+        sort_columns = [col for col in ["important_student_restriction", "context_level", "context_name", "role", "capability"] if col in df.columns]
+        if sort_columns:
+            ascending = [False] + [True] * (len(sort_columns) - 1) if sort_columns[0] == "important_student_restriction" else [True] * len(sort_columns)
+            df = df.sort_values(sort_columns, ascending=ascending, kind="stable")
+
+        rows = []
+        for _, row in df.iterrows():
+            flagged = _truthy_csv_value(row.get("important_student_restriction", False))
+            location = row.get("activity_name", "") if clean_label(row.get("context_level", "")).lower() == "activity" else row.get("context_name", "")
+            if not clean_label(location).strip():
+                location = row.get("context_name", "")
+            permission = clean_label(row.get("permission", ""))
+            permission_class = re.sub(r"[^a-z0-9_-]", "", permission.lower())
+            rows.append(
+                f'<tr class="{"review-row" if flagged else ""}">'
+                f'<td>{safe_html(row.get("context_level", ""))}</td>'
+                f'<td>{safe_html(shorten(location, 65))}</td>'
+                f'<td>{safe_html(row.get("role", ""))}</td>'
+                f'<td><code>{safe_html(row.get("capability", ""))}</code></td>'
+                f'<td><span class="permission-badge permission-{permission_class}">{safe_html(permission)}</span></td>'
+                f'<td>{"Review" if flagged else ""}</td>'
+                '</tr>'
+            )
+        body += f"""
+        <details class="permission-details">
+          <summary>View all {len(df):,} explicit permission override{'s' if len(df) != 1 else ''}</summary>
+          <div class="inventory-table-wrap permission-table-wrap">
+            <table>
+              <thead><tr><th>Context</th><th>Location</th><th>Role</th><th>Capability</th><th>Permission</th><th>Flag</th></tr></thead>
+              <tbody>{''.join(rows)}</tbody>
+            </table>
+          </div>
+        </details>
+        """
+    else:
+        body += '<div class="empty-state">No explicit capability overrides were recorded in the parsed roles.xml files.</div>'
+
+    interpretation = clean_label(summary.get("interpretation", "")).strip()
+    if interpretation:
+        body += f'<p class="permission-interpretation">{safe_html(interpretation)}</p>'
+    return body
+
+
 def make_data_quality_notes(data: Dict[str, Any]) -> str:
     notes = [
         "Core dashboard measures use Moodle backup XML metadata. Optional Moodle report data is used only when explicitly detected.",
@@ -1658,6 +1836,15 @@ def build_dashboard_html(input_folder: Path, data: Dict[str, Any]) -> str:
             "".join(part for part in content_parts if part),
             "Evidence-based inventory from Moodle backup file metadata and references stored in activity XML. "
             "Classifications are rule-based; unresolved or uncertain items remain visible rather than being guessed.",
+        ))
+
+    permissions_section = make_permissions_section(data)
+    if permissions_section:
+        panels.append(panel(
+            "Course access and permissions",
+            permissions_section,
+            "Shows explicit role capability overrides captured when the backup was created. "
+            "Capabilities not listed continue to inherit Moodle's normal role configuration.",
         ))
 
     age_chart = make_age_chart(data)
@@ -1787,6 +1974,50 @@ def build_dashboard_html(input_folder: Path, data: Dict[str, Any]) -> str:
     }}
     .integration-note ul {{
       margin-top: 6px;
+    }}
+    .permission-context {{
+      margin: 14px 0;
+    }}
+    .review-notice {{
+      margin: 14px 0;
+      padding: 12px 14px;
+      border-left: 4px solid #b45309;
+      border-radius: 8px;
+      background: #fff7ed;
+      color: #7c2d12;
+    }}
+    .permission-details {{
+      margin-top: 16px;
+    }}
+    .permission-details summary {{
+      cursor: pointer;
+      color: var(--accent);
+      font-weight: 700;
+    }}
+    .permission-table-wrap {{
+      max-height: 440px;
+      margin-top: 12px;
+    }}
+    .permission-badge {{
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #eef2f7;
+      font-size: 0.82rem;
+      font-weight: 700;
+    }}
+    .permission-allow {{ background: #dcfce7; color: #166534; }}
+    .permission-prevent {{ background: #ffedd5; color: #9a3412; }}
+    .permission-prohibit {{ background: #fee2e2; color: #991b1b; }}
+    .review-row {{ background: #fffaf0; }}
+    .permission-interpretation {{
+      color: var(--muted);
+      margin: 14px 0 0;
+      font-size: 0.9rem;
+    }}
+    code {{
+      white-space: nowrap;
+      font-size: 0.86em;
     }}
     .table-wrap {{
       overflow-x: auto;

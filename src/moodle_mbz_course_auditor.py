@@ -3,7 +3,7 @@
 Moodle MBZ XML Metadata Auditor
 ===============================
 
-Version: 2.4
+Version: 2.5
 
 Audits Moodle course backup files (.mbz) using XML metadata only.
 
@@ -37,6 +37,9 @@ It reads:
 - activities/*/[activity_type].xml
 - files.xml
 - questions.xml
+- roles.xml and course/roles.xml
+- activities/*/roles.xml
+- course/enrolments.xml
 
 Outputs per course:
 - audit_report.md
@@ -68,6 +71,8 @@ Outputs per course:
 - content_category_summary.csv
 - hosting_summary.csv
 - content_placement_inventory.csv
+- course_permissions.csv
+- course_access_summary.csv
 
 Batch mode also outputs:
 - combined_course_summary.csv
@@ -140,6 +145,32 @@ GENERIC_ACTIVITY_XML = {
     "grade_history.xml",
     "inforef.xml",
     "grading.xml",
+}
+
+PERMISSION_NAMES = {
+    "1": "Allow",
+    "-1": "Prevent",
+    "-1000": "Prohibit",
+    "0": "Not set",
+}
+
+# These capabilities can materially affect ordinary learner participation or
+# access. They are flags for human review, not automatic error judgements.
+STUDENT_REVIEW_CAPABILITIES = {
+    "mod/assign:submit",
+    "mod/choice:choose",
+    "mod/data:writeentry",
+    "mod/feedback:complete",
+    "mod/forum:addnews",
+    "mod/forum:addquestion",
+    "mod/forum:replypost",
+    "mod/forum:startdiscussion",
+    "mod/glossary:write",
+    "mod/lesson:manageattempts",
+    "mod/quiz:attempt",
+    "mod/scorm:savetrack",
+    "mod/wiki:editpage",
+    "moodle/course:view",
 }
 
 
@@ -334,6 +365,96 @@ def find_activity_specific_xml(activity_dir: Path, modulename: str) -> Optional[
         if xml_file.name not in GENERIC_ACTIVITY_XML:
             return xml_file
     return None
+
+
+def permission_name(value: str) -> str:
+    """Return Moodle's conventional name while preserving unknown codes."""
+    cleaned = str(value or "").strip()
+    return PERMISSION_NAMES.get(cleaned, f"Unknown ({cleaned})" if cleaned else "Unknown")
+
+
+def parse_role_definitions(root_dir: Path) -> Dict[str, Dict[str, str]]:
+    """Read role labels/archetypes from the backup-wide roles.xml, if present."""
+    definitions: Dict[str, Dict[str, str]] = {}
+    roles_root = parse_xml(root_dir / "roles.xml")
+    if roles_root is None:
+        return definitions
+
+    for role in roles_root.findall(".//role"):
+        role_id = role.attrib.get("id", "") or child_text(role, "id") or child_text(role, "roleid")
+        shortname = child_text(role, "shortname")
+        name = child_text(role, "name")
+        archetype = child_text(role, "archetype")
+        # Ignore role assignment/override containers that happen to use a
+        # <role> element but do not define a role.
+        if role_id and (shortname or name or archetype):
+            definitions[role_id] = {
+                "role_id": role_id,
+                "role": name or shortname or archetype or f"Role {role_id}",
+                "role_shortname": shortname,
+                "role_archetype": archetype,
+            }
+    return definitions
+
+
+def parse_role_overrides_file(
+    roles_xml: Path,
+    root_dir: Path,
+    context_level: str,
+    context_name: str,
+    role_definitions: Dict[str, Dict[str, str]],
+    activity: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Parse explicit capability overrides from one Moodle roles.xml file."""
+    roles_root = parse_xml(roles_xml)
+    if roles_root is None:
+        return []
+
+    records: List[Dict[str, Any]] = []
+    candidates = roles_root.findall(".//role_overrides/override")
+    candidates += roles_root.findall(".//role_overrides/role_override")
+    if not candidates:
+        candidates = roles_root.findall(".//override")
+
+    for override in candidates:
+        role_id = override.attrib.get("roleid", "") or child_text(override, "roleid")
+        capability = override.attrib.get("capability", "") or child_text(override, "capability")
+        raw_permission = override.attrib.get("permission", "") or child_text(override, "permission")
+        if not capability:
+            continue
+
+        definition = role_definitions.get(role_id, {})
+        role_label = definition.get("role") or f"Role {role_id or 'unknown'}"
+        role_shortname = definition.get("role_shortname", "")
+        role_archetype = definition.get("role_archetype", "")
+        is_student_role = (role_shortname.lower() == "student" or role_archetype.lower() == "student")
+        permission = permission_name(raw_permission)
+        important_student_restriction = (
+            is_student_role
+            and permission in {"Prevent", "Prohibit"}
+            and capability.lower() in STUDENT_REVIEW_CAPABILITIES
+        )
+        activity = activity or {}
+        records.append({
+            "context_level": context_level,
+            "context_id": activity.get("context_id", ""),
+            "context_name": context_name,
+            "role_id": role_id,
+            "role": role_label,
+            "role_shortname": role_shortname,
+            "role_archetype": role_archetype,
+            "capability": capability,
+            "permission": permission,
+            "permission_value_from_xml": raw_permission,
+            "important_student_restriction": important_student_restriction,
+            "module_id": activity.get("module_id", ""),
+            "activity_type": activity.get("activity_type", ""),
+            "activity_name": activity.get("activity_name", ""),
+            "section_number": activity.get("section_number", ""),
+            "section_name": activity.get("section_name", ""),
+            "source_file": str(roles_xml.relative_to(root_dir)),
+        })
+    return records
 
 
 def domain_from_url(url: str) -> str:
@@ -619,6 +740,9 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         "content_category_summary": [],
         "hosting_summary": [],
         "content_placement_inventory": [],
+        "course_permissions": [],
+        "course_access_summary": [],
+        "enrolment_methods": [],
         "questions": {},
         "xml_findings": [],
         "factual_observations": [],
@@ -832,6 +956,77 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
             })
 
     data["activity_type_counts"] = dict(type_counts)
+
+    # Explicit role capability overrides. These are configuration snapshots at
+    # backup time; they are not a reconstruction of every inherited permission.
+    role_definitions = parse_role_definitions(root_dir)
+    course_name = data["course"].get("fullname") or data["course"].get("shortname") or "Course"
+    permission_records: List[Dict[str, Any]] = []
+    course_roles_xml = root_dir / "course" / "roles.xml"
+    if course_roles_xml.exists():
+        permission_records.extend(parse_role_overrides_file(
+            course_roles_xml, root_dir, "course", course_name, role_definitions
+        ))
+
+    activity_by_folder = {a.get("activity_folder", ""): a for a in data["activities"]}
+    for activity_roles_xml in sorted((root_dir / "activities").glob("*/roles.xml")) if (root_dir / "activities").exists() else []:
+        activity = activity_by_folder.get(activity_roles_xml.parent.name, {})
+        permission_records.extend(parse_role_overrides_file(
+            activity_roles_xml,
+            root_dir,
+            "activity",
+            activity.get("activity_name", activity_roles_xml.parent.name),
+            role_definitions,
+            activity,
+        ))
+
+    data["course_permissions"] = sorted(permission_records, key=lambda r: (
+        0 if r.get("context_level") == "course" else 1,
+        parse_int(r.get("section_number"), 999999),
+        str(r.get("activity_name", "")),
+        str(r.get("role", "")),
+        str(r.get("capability", "")),
+    ))
+
+    # Enrolment methods affect access into the course, but individual user role
+    # assignments are intentionally excluded from this high-level audit.
+    enrolments_root = parse_xml(root_dir / "course" / "enrolments.xml")
+    if enrolments_root is not None:
+        for enrol in enrolments_root.findall(".//enrols/enrol") + enrolments_root.findall(".//enrol"):
+            plugin = child_text(enrol, "enrol") or child_text(enrol, "plugin")
+            enrol_id = enrol.attrib.get("id", "") or child_text(enrol, "id")
+            if not plugin or any(r.get("enrolment_instance_id") == enrol_id for r in data["enrolment_methods"]):
+                continue
+            data["enrolment_methods"].append({
+                "enrolment_instance_id": enrol_id,
+                "enrolment_method": plugin,
+                "status_from_xml": child_text(enrol, "status", "0"),
+                "enabled_at_backup": child_text(enrol, "status", "0") == "0",
+                "role_id": child_text(enrol, "roleid"),
+                "source_file": "course/enrolments.xml",
+            })
+
+    permission_counts = Counter(r["permission"] for r in data["course_permissions"])
+    affected_roles = sorted({r["role"] for r in data["course_permissions"]})
+    activity_override_names = sorted({r["activity_name"] for r in data["course_permissions"] if r["context_level"] == "activity"})
+    important_student_restrictions = [r for r in data["course_permissions"] if r["important_student_restriction"]]
+    data["course_access_summary"] = [{
+        "explicit_override_count": len(data["course_permissions"]),
+        "course_level_override_count": sum(r["context_level"] == "course" for r in data["course_permissions"]),
+        "activity_level_override_count": sum(r["context_level"] == "activity" for r in data["course_permissions"]),
+        "activities_with_overrides_count": len(activity_override_names),
+        "roles_affected_count": len(affected_roles),
+        "roles_affected": "; ".join(affected_roles),
+        "allow_count": permission_counts.get("Allow", 0),
+        "prevent_count": permission_counts.get("Prevent", 0),
+        "prohibit_count": permission_counts.get("Prohibit", 0),
+        "other_permission_value_count": sum(v for k, v in permission_counts.items() if k not in {"Allow", "Prevent", "Prohibit"}),
+        "important_student_restriction_count": len(important_student_restrictions),
+        "enrolment_method_count": len(data["enrolment_methods"]),
+        "enabled_enrolment_method_count": sum(bool(r["enabled_at_backup"]) for r in data["enrolment_methods"]),
+        "enrolment_methods": "; ".join(sorted({r["enrolment_method"] for r in data["enrolment_methods"]})),
+        "interpretation": "Explicit overrides recorded in the backup; unlisted capabilities continue to inherit Moodle role configuration.",
+    }]
 
     for section in sorted(data["sections"], key=lambda x: x.get("section_number", 0)):
         sid = section["section_id"]
@@ -1298,6 +1493,10 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         parse_int(r.get("placement_count"), 1) for r in external_videos if r.get("provider") != "panopto"
     )
     moodle_video_size_mb = round(sum(float(r.get("size_mb") or 0) for r in moodle_videos), 3)
+    access_summary = data["course_access_summary"][0]
+    important_student_restrictions = [
+        r for r in data["course_permissions"] if r.get("important_student_restriction")
+    ]
 
     primary_delivery_pattern = choose_primary_delivery_pattern(type_counts)
     dominant_activity_types = "; ".join(f"{k}: {v}" for k, v in type_counts.most_common(5))
@@ -1325,6 +1524,9 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         "other_external_video_reference_count": other_external_video_placements,
         "other_external_unique_video_count": len(external_videos) - len(panopto_videos),
         "content_items_requiring_review": len(unresolved_content),
+        "explicit_permission_override_count": access_summary["explicit_override_count"],
+        "important_student_restriction_count": access_summary["important_student_restriction_count"],
+        "activities_with_permission_overrides_count": access_summary["activities_with_overrides_count"],
     }]
 
     data["course_footprint"] = [{
@@ -1345,6 +1547,10 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         "moodle_hosted_video_count": len(moodle_videos),
         "moodle_hosted_video_size_mb": moodle_video_size_mb,
         "external_video_reference_count": len(external_videos),
+        "explicit_permission_override_count": access_summary["explicit_override_count"],
+        "course_level_permission_override_count": access_summary["course_level_override_count"],
+        "activity_level_permission_override_count": access_summary["activity_level_override_count"],
+        "important_student_restriction_count": access_summary["important_student_restriction_count"],
     }]
 
     findings = []
@@ -1366,6 +1572,18 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         findings.append(f"LTI activities: {len(lti_activities)}.")
     if pluginfile_activities:
         findings.append(f"Activities with @@PLUGINFILE@@ references in XML-stored HTML: {len(pluginfile_activities)}.")
+    if data["course_permissions"]:
+        findings.append(
+            f"Explicit permission overrides recorded in the backup: {len(data['course_permissions'])} "
+            f"({access_summary['course_level_override_count']} course-level; "
+            f"{access_summary['activity_level_override_count']} activity-level)."
+        )
+    for restriction in important_student_restrictions:
+        location = "course level" if restriction["context_level"] == "course" else f"activity '{restriction['activity_name']}'"
+        findings.append(
+            f"Student participation/access review: {restriction['role']} is explicitly "
+            f"{restriction['permission'].lower()}ed from {restriction['capability']} at {location}."
+        )
 
     data["xml_findings"] = findings
 
@@ -1394,6 +1612,11 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
     )
     observations.append(
         f"questions.xml contains {data['questions']['question_count_from_questions_xml']} question records."
+    )
+    observations.append(
+        f"Permission metadata contains {access_summary['explicit_override_count']} explicit capability overrides "
+        f"affecting {access_summary['roles_affected_count']} roles; "
+        f"{access_summary['important_student_restriction_count']} student restriction(s) are flagged for review."
     )
 
     data["factual_observations"] = observations
@@ -1437,6 +1660,16 @@ def audit_course(root_dir: Path) -> Dict[str, Any]:
         "other_external_video_reference_count": other_external_video_placements,
         "other_external_unique_video_count": len(external_videos) - len(panopto_videos),
         "content_items_requiring_review": len(unresolved_content),
+        "explicit_permission_override_count": access_summary["explicit_override_count"],
+        "course_level_permission_override_count": access_summary["course_level_override_count"],
+        "activity_level_permission_override_count": access_summary["activity_level_override_count"],
+        "activities_with_permission_overrides_count": access_summary["activities_with_overrides_count"],
+        "roles_affected_by_permission_overrides_count": access_summary["roles_affected_count"],
+        "permission_allow_count": access_summary["allow_count"],
+        "permission_prevent_count": access_summary["prevent_count"],
+        "permission_prohibit_count": access_summary["prohibit_count"],
+        "important_student_restriction_count": access_summary["important_student_restriction_count"],
+        "enrolment_method_count": access_summary["enrolment_method_count"],
     }
 
     return data
@@ -1497,6 +1730,16 @@ def flatten_course_summary(data: Dict[str, Any], source_name: str, archive_type:
         "other_external_video_reference_count": summary.get("other_external_video_reference_count", 0),
         "other_external_unique_video_count": summary.get("other_external_unique_video_count", 0),
         "content_items_requiring_review": summary.get("content_items_requiring_review", 0),
+        "explicit_permission_override_count": summary.get("explicit_permission_override_count", 0),
+        "course_level_permission_override_count": summary.get("course_level_permission_override_count", 0),
+        "activity_level_permission_override_count": summary.get("activity_level_permission_override_count", 0),
+        "activities_with_permission_overrides_count": summary.get("activities_with_permission_overrides_count", 0),
+        "roles_affected_by_permission_overrides_count": summary.get("roles_affected_by_permission_overrides_count", 0),
+        "permission_allow_count": summary.get("permission_allow_count", 0),
+        "permission_prevent_count": summary.get("permission_prevent_count", 0),
+        "permission_prohibit_count": summary.get("permission_prohibit_count", 0),
+        "important_student_restriction_count": summary.get("important_student_restriction_count", 0),
+        "enrolment_method_count": summary.get("enrolment_method_count", 0),
     }
 
     for activity_type, count in summary.get("activity_type_counts_from_xml", {}).items():
@@ -1569,6 +1812,31 @@ def write_text_report(path: Path, data: Dict[str, Any], source_name: str, archiv
     lines.append(f"Start date: {course.get('startdate', '')}")
     lines.append(f"End date: {course.get('enddate', '')}")
     lines.append(f"Last modified: {course.get('timemodified', '')}")
+
+    access = data.get("course_access_summary", [{}])[0]
+    lines.append("")
+    lines.append("COURSE ACCESS AND PERMISSIONS")
+    lines.append("-" * 29)
+    lines.append(f"Explicit overrides: {access.get('explicit_override_count', 0)}")
+    lines.append(f"Course-level overrides: {access.get('course_level_override_count', 0)}")
+    lines.append(f"Activity-level overrides: {access.get('activity_level_override_count', 0)}")
+    lines.append(f"Roles affected: {access.get('roles_affected', '')}")
+    lines.append(
+        f"Allow / Prevent / Prohibit: {access.get('allow_count', 0)} / "
+        f"{access.get('prevent_count', 0)} / {access.get('prohibit_count', 0)}"
+    )
+    lines.append(f"Important student restrictions for review: {access.get('important_student_restriction_count', 0)}")
+    lines.append(f"Enrolment methods recorded: {access.get('enrolment_methods', '')}")
+    if data.get("course_permissions"):
+        for permission in data["course_permissions"]:
+            flag = " | REVIEW" if permission.get("important_student_restriction") else ""
+            lines.append(
+                f"- {permission.get('context_level', '')}: {permission.get('context_name', '')} | "
+                f"{permission.get('role', '')} | {permission.get('capability', '')} | "
+                f"{permission.get('permission', '')}{flag}"
+            )
+    else:
+        lines.append("No explicit capability overrides were recorded in the parsed roles.xml files.")
 
     lines.append("")
     lines.append("SUMMARY COUNTS")
@@ -1746,6 +2014,8 @@ def write_text_report(path: Path, data: Dict[str, Any], source_name: str, archiv
     lines.append("Uploaded file contents are not opened or scanned.")
     lines.append("Content categories and providers are deterministic classifications derived from MIME types, extensions, HTML elements, URLs, and Moodle components.")
     lines.append("External references indicate presence in the backup, not current availability or permissions.")
+    lines.append("Permission findings describe explicit overrides captured at backup time; capabilities without an override inherit Moodle role configuration.")
+    lines.append("Prevent can be overridden in a lower context; Prohibit normally cannot. Permission flags require human review and are not automatic error findings.")
     lines.append("No quality score, risk score, severity score, or pedagogic rating is generated.")
 
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -1809,6 +2079,36 @@ def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, ar
         ["Last modified", course.get("timemodified", "")],
     ]
     lines.append(markdown_table(overview_rows, ["Field", "Value"]))
+    lines.append("")
+
+    lines.append("## Course Access and Permissions")
+    lines.append("")
+    access = data.get("course_access_summary", [{}])[0]
+    access_rows = [
+        ["Explicit overrides", access.get("explicit_override_count", 0)],
+        ["Course-level overrides", access.get("course_level_override_count", 0)],
+        ["Activity-level overrides", access.get("activity_level_override_count", 0)],
+        ["Activities with overrides", access.get("activities_with_overrides_count", 0)],
+        ["Roles affected", access.get("roles_affected", "")],
+        ["Allow", access.get("allow_count", 0)],
+        ["Prevent", access.get("prevent_count", 0)],
+        ["Prohibit", access.get("prohibit_count", 0)],
+        ["Important student restrictions for review", access.get("important_student_restriction_count", 0)],
+        ["Enrolment methods", access.get("enrolment_methods", "")],
+    ]
+    lines.append(markdown_table(access_rows, ["Metric", "Value"]))
+    lines.append("")
+    permission_rows = []
+    for permission in data.get("course_permissions", []):
+        permission_rows.append([
+            permission.get("context_level", ""), permission.get("context_name", ""),
+            permission.get("role", ""), permission.get("capability", ""),
+            permission.get("permission", ""),
+            "Review" if permission.get("important_student_restriction") else "",
+        ])
+    lines.append(markdown_table(permission_rows, ["Context", "Location", "Role", "Capability", "Permission", "Flag"]) if permission_rows else "_No explicit capability overrides were recorded in the parsed roles.xml files._")
+    lines.append("")
+    lines.append("> These are explicit overrides captured when the backup was created. Capabilities not listed here continue to inherit Moodle's role configuration. `Prevent` may be overridden lower in the context hierarchy; `Prohibit` normally cannot. Review flags are not automatic error judgements.")
     lines.append("")
 
     lines.append("## 4. Summary Counts")
@@ -2020,6 +2320,7 @@ def write_markdown_report(path: Path, data: Dict[str, Any], source_name: str, ar
     lines.append("- Uploaded file contents are not opened or scanned.")
     lines.append("- Content categories and providers are deterministic classifications derived from MIME types, extensions, HTML elements, URLs, and Moodle components.")
     lines.append("- External references establish that a URL was stored in the backup; they do not test current availability or permissions.")
+    lines.append("- Permission findings describe explicit overrides captured at backup time, not every effective inherited permission.")
     lines.append("- No pedagogic judgement, quality score, risk score, or severity score is generated.")
     lines.append("- CSV and JSON outputs retain explicit `_from_xml` field names for machine-readable clarity.")
     lines.append("")
@@ -2050,6 +2351,8 @@ def process_single_mbz(mbz_path: Path, output_dir: Path, keep_extracted: bool = 
         write_csv(output_dir / "content_category_summary.csv", data["content_category_summary"])
         write_csv(output_dir / "hosting_summary.csv", data["hosting_summary"])
         write_csv(output_dir / "content_placement_inventory.csv", data["content_placement_inventory"])
+        write_csv(output_dir / "course_permissions.csv", data["course_permissions"])
+        write_csv(output_dir / "course_access_summary.csv", data["course_access_summary"])
         write_csv(output_dir / "section_activity_breakdown.csv", data["section_activity_breakdown"])
         write_csv(output_dir / "book_inventory.csv", data["book_inventory"])
         write_csv(output_dir / "duplicate_activity_inventory.csv", data["duplicate_activity_inventory"])
@@ -2244,6 +2547,8 @@ def main() -> int:
     print(f"- {output_dir / 'content_category_summary.csv'}")
     print(f"- {output_dir / 'hosting_summary.csv'}")
     print(f"- {output_dir / 'content_placement_inventory.csv'}")
+    print(f"- {output_dir / 'course_permissions.csv'}")
+    print(f"- {output_dir / 'course_access_summary.csv'}")
     print(f"- {output_dir / 'audit_data.json'}")
     return 0
 
