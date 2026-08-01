@@ -29,6 +29,35 @@ The auditor is deliberately conservative: it reports evidence contained in the b
 
 See [`HANDBOOK.md`](HANDBOOK.md) for the full operational guide, interpretation guidance, output catalogue, limitations and troubleshooting.
 
+
+## Example outputs
+
+The platform generates structured audit data, an interactive dashboard, and—when file extraction is enabled—organised copies of Moodle-hosted resources.
+
+### Audit datasets
+
+The auditor extracts structured information from the Moodle `.mbz` backup and generates CSV, JSON, Markdown and text files for further analysis.
+
+![Generated Moodle audit datasets](img/audit.png)
+
+### Interactive data visualisation
+
+The dashboard generator automatically turns the audit data into an interactive HTML visualisation. The following screenshots show examples of the course overview, resource analysis and content visualisations.
+
+![Moodle course dashboard overview](img/data_viz1.png)
+
+![Moodle resource analysis visualisation](img/data_viz2.png)
+
+![Moodle content analysis visualisation](img/data_viz3.png)
+
+### Extracted Moodle resources
+
+When the optional file-extraction feature is enabled, Moodle-hosted resources—such as PDFs, Word documents, presentations, images and videos—are reconstructed and placed into organised folders.
+
+![Extracted Moodle course resources](img/extracted_files.png)
+
+> Screenshots are illustrative. The reports, dashboard panels and extracted files will vary according to the content and backup settings of each Moodle course.
+
 ## Recommended repository structure
 
 ```text
