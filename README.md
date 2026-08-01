@@ -32,31 +32,51 @@ See [`HANDBOOK.md`](HANDBOOK.md) for the full operational guide, interpretation 
 
 ## Example outputs
 
-The platform generates structured audit data, an interactive dashboard, and—when file extraction is enabled—organised copies of Moodle-hosted resources.
+The platform generates structured audit datasets, an interactive dashboard and, when requested, organised copies of Moodle-hosted resources.
 
 ### Audit datasets
 
 The auditor extracts structured information from the Moodle `.mbz` backup and generates CSV, JSON, Markdown and text files for further analysis.
 
-![Generated Moodle audit datasets](img/audit.png)
+<p align="center">
+  <img src="img/audit.png" alt="Generated Moodle audit datasets" width="800">
+</p>
 
-### Interactive data visualisation
+<p align="center"><em>Generated audit datasets available for further analysis.</em></p>
 
-The dashboard generator automatically turns the audit data into an interactive HTML visualisation. The following screenshots show examples of the course overview, resource analysis and content visualisations.
+### Sample dashboard visualisations
 
-![Moodle course dashboard overview](img/data_viz1.png)
+The following images are sample screenshots from the automatically generated interactive HTML dashboard.
 
-![Moodle resource analysis visualisation](img/data_viz2.png)
+<p align="center">
+  <img src="img/data_viz1.png" alt="Sample dashboard screenshot 1" width="800">
+</p>
 
-![Moodle content analysis visualisation](img/data_viz3.png)
+<p align="center"><em>Sample data visualisation — screenshot 1.</em></p>
+
+<p align="center">
+  <img src="img/data_viz2.png" alt="Sample dashboard screenshot 2" width="800">
+</p>
+
+<p align="center"><em>Sample data visualisation — screenshot 2.</em></p>
+
+<p align="center">
+  <img src="img/data_viz3.png" alt="Sample dashboard screenshot 3" width="800">
+</p>
+
+<p align="center"><em>Sample data visualisation — screenshot 3.</em></p>
 
 ### Extracted Moodle resources
 
-When the optional file-extraction feature is enabled, Moodle-hosted resources—such as PDFs, Word documents, presentations, images and videos—are reconstructed and placed into organised folders.
+When optional file extraction is enabled, Moodle-hosted resources—such as PDFs, Word documents, presentations, images and videos—are reconstructed in organised folders.
 
-![Extracted Moodle course resources](img/extracted_files.png)
+<p align="center">
+  <img src="img/extracted_files.png" alt="Extracted Moodle course resources" width="800">
+</p>
 
-> Screenshots are illustrative. The reports, dashboard panels and extracted files will vary according to the content and backup settings of each Moodle course.
+<p align="center"><em>Example of Moodle-hosted files reconstructed from an MBZ backup.</em></p>
+
+> These screenshots are illustrative. Available reports, dashboard panels and extracted resources depend on the course content and Moodle backup selections.
 
 ## Recommended repository structure
 
