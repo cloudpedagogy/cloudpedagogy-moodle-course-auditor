@@ -34,15 +34,7 @@ See [`HANDBOOK.md`](HANDBOOK.md) for the full operational guide, interpretation 
 
 The platform generates structured audit datasets, an interactive dashboard and, when requested, organised copies of Moodle-hosted resources.
 
-### Audit datasets
 
-The auditor extracts structured information from the Moodle `.mbz` backup and generates CSV, JSON, Markdown and text files for further analysis.
-
-<p align="center">
-  <img src="img/audit.png" alt="Generated Moodle audit datasets" width="600">
-</p>
-
-<p align="center"><em>Generated audit datasets available for further analysis.</em></p>
 
 ### Sample dashboard visualisations
 
@@ -76,7 +68,19 @@ When optional file extraction is enabled, Moodle-hosted resources—such as PDFs
 
 <p align="center"><em>Example of Moodle-hosted files reconstructed from an MBZ backup.</em></p>
 
+### Audit datasets
+
+The auditor extracts structured information from the Moodle `.mbz` backup and generates CSV, JSON, Markdown and text files for further analysis.
+
+<p align="center">
+  <img src="img/audit.png" alt="Generated Moodle audit datasets" width="600">
+</p>
+
+<p align="center"><em>Generated audit datasets available for further analysis.</em></p>
+
 > These screenshots are illustrative. Available reports, dashboard panels and extracted resources depend on the course content and Moodle backup selections.
+
+
 
 ## Recommended repository structure
 
