@@ -63,7 +63,7 @@ The following images are sample screenshots from the automatically generated int
 When optional file extraction is enabled, Moodle-hosted resources—such as PDFs, Word documents, presentations, images and videos—are reconstructed in organised folders.
 
 <p align="center">
-  <img src="img/moodle_extracted_files.png" alt="Extracted Moodle course resources" width="500">
+  <img src="img/moodle_extracted_files.png" alt="Extracted Moodle course resources" width="600">
 </p>
 
 <p align="center"><em>Example of Moodle-hosted files reconstructed from an MBZ backup.</em></p>
