@@ -33,16 +33,16 @@ See [`HANDBOOK.md`](HANDBOOK.md) for the full operational guide, interpretation 
 
 ```text
 cloudpedagogy-moodle-course-auditor/
-â”œâ”€â”€ README.md
-â”œâ”€â”€ HANDBOOK.md
-â”œâ”€â”€ requirements.txt
-â”œâ”€â”€ src/
-â”‚   â”œâ”€â”€ batch_audit.py
-â”‚   â”œâ”€â”€ moodle_mbz_course_auditor.py
-â”‚   â”œâ”€â”€ moodle_dashboard_generator.py
-â”‚   â””â”€â”€ extract_moodle_files.py
-â”œâ”€â”€ batch_input/       # Put one or more .mbz files here
-â””â”€â”€ batch_output/      # Generated results
+|-- README.md
+|-- HANDBOOK.md
+|-- requirements.txt
+|-- src/
+|   |-- batch_audit.py
+|   |-- moodle_mbz_course_auditor.py
+|   |-- moodle_dashboard_generator.py
+|   `-- extract_moodle_files.py
+|-- batch_input/       # Put one or more .mbz files here
+`-- batch_output/      # Generated results
 ```
 
 The folder names are not hard-coded. You may use different names if the command uses the corresponding paths.
@@ -123,16 +123,16 @@ the controller creates:
 
 ```text
 batch_output/
-â”œâ”€â”€ batch_summary.csv
-â””â”€â”€ 5729-lshtm_2489_2025-20260731-2245/
-    â”œâ”€â”€ audit/
-    â”‚   â”œâ”€â”€ audit_report.md
-    â”‚   â”œâ”€â”€ audit_report.txt
-    â”‚   â”œâ”€â”€ audit_data.json
-    â”‚   â””â”€â”€ generated CSV files
-    â”œâ”€â”€ dashboard.html
-    â”œâ”€â”€ processing.log
-    â””â”€â”€ extracted_files/       # only with --extract-files
+|-- batch_summary.csv
+`-- 5729-lshtm_2489_2025-20260731-2245/
+    |-- audit/
+    |   |-- audit_report.md
+    |   |-- audit_report.txt
+    |   |-- audit_data.json
+    |   `-- generated CSV files
+    |-- dashboard.html
+    |-- processing.log
+    `-- extracted_files/       # Only with --extract-files
 ```
 
 The folder name retains the Moodle course ID, recognisable course name/year and backup timestamp. This is clearer and safer than using only the course ID.
