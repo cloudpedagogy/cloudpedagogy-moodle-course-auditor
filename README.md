@@ -9,22 +9,25 @@ The source Moodle backup is read but not modified.
 The recommended entry point is `src/orchestrator.py`. It runs the appropriate scripts for the workflow you request and understands dependencies between them.
 
 ```text
-                                  Moodle .mbz
-                                      |
-                    +-----------------+------------------+
-                    |                 |                  |
-                    v                 v                  v
-                  Auditor          Extractor      Settings analyser
-                    |                 |                  |
-                    v                 |                  |
-                Dashboard             |                  |
-                    |                 |                  |
-                    +--------+--------+                  |
-                             |                           |
-                             v                           |
-                       Content mapper                    |
-                                                         |
-     Before .mbz + After .mbz --> Comparator             |
+                         Moodle .mbz
+                              |
+          +-------------------+-------------------+
+          |                   |                   |
+          v                   v                   v
+       Auditor             Extractor       Settings analyser
+          |                   |
+          +----> Dashboard    |
+          |                   |
+          +---------+---------+
+                    |
+                    v
+              Content mapper
+
+
+       Before .mbz + After .mbz
+                  |
+                  v
+              Comparator
 ```
 
 The **content mapper is dependency-aware**: it does not read an `.mbz` directly. It requires the auditor outputs plus the extracted files. When `--content-map` is requested, the orchestrator automatically runs the required audit and extraction stages first.
