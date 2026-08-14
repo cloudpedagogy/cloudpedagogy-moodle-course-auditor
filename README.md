@@ -20,6 +20,9 @@ The recommended entry point is `src/orchestrator.py`. It runs the appropriate sc
           |                   |
           +---------+---------+
                     |
+           audit + extracted
+               resources
+                    |
                     v
               Content mapper
 
