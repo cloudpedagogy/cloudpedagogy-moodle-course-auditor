@@ -1,89 +1,188 @@
-# Preparing a Moodle Backup for Course Audit
+# Preparing a Moodle Backup for Course Analysis
 
-This guide explains how to create a privacy-conscious Moodle backup containing the evidence needed by CloudPedagogy Moodle Course Auditor.
+This guide explains how to create a privacy-conscious Moodle backup containing the evidence needed by the CloudPedagogy Moodle Course Analysis Platform.
+
+The recommended workflow uses Moodle's native `.mbz` backup format.
 
 ## Recommended settings
 
-Create a normal Moodle `.mbz` backup using these initial settings.
-
 | Moodle backup setting | Select? | Reason |
 |---|:---:|---|
-| IMS Common Cartridge 1.1 | No | The auditor expects Moodle's native backup structure. |
-| Include enrolled users | No | Learner identities are unnecessary for a course-content audit. |
+| IMS Common Cartridge 1.1 | **No** | The platform expects Moodle's native backup structure. |
+| Include enrolled users | **No** | Learner identities are unnecessary for normal structural/content analysis. |
 | Anonymize user information | No | Normally unnecessary when enrolled users are excluded. |
-| Include user role assignments | No | Individual role assignments are not needed. |
-| Include activities and resources | **Yes** | Essential for sections, activities, Books, URLs and embedded content. |
+| Include user role assignments | No | Individual user-role assignments are not required for the normal audit. |
+| Include activities and resources | **Yes** | Essential for course structure, activities, Books, URLs and content mapping. |
 | Include blocks | **Yes** | Provides a fuller record of course configuration. |
-| Include files | **Yes** | Essential for file counts, storage and Moodle-hosted video detection. |
-| Include filters | **Yes** | Retains relevant filtering and embedding configuration. |
-| Include comments | No | Not used and may contain personal information. |
-| Include badges | No | Not required by the current audit. |
-| Include calendar events | No | Not required by the current audit. |
-| Include user completion details | No | Learner data; not needed. |
-| Include course logs | No | Potentially sensitive and not used. |
-| Include grade history | No | Potentially sensitive and not used. |
-| Include question bank | Optional | Select when question metadata is required. |
-| Include groups and groupings | No | Select only if group configuration is specifically required. |
-| Include custom fields | **Yes** | Retains useful course and activity metadata. |
-| Include content bank content | **Yes** | Important for H5P and content-bank items. |
+| Include files | **Yes** | Essential for storage analysis, Moodle-hosted media detection, extraction and content mapping. |
+| Include filters | **Yes** | Retains relevant filtering/embedding configuration. |
+| Include comments | No | Not used by the normal audit and may contain personal information. |
+| Include badges | No | Not required by the current workflow. |
+| Include calendar events | No | Not required by the current workflow. |
+| Include user completion details | No | Learner data; not required. |
+| Include course logs | No | Potentially sensitive and not required by the normal workflow. |
+| Include grade history | No | Potentially sensitive and not required. |
+| Include question bank | Optional | Select when question metadata analysis is required. |
+| Include groups and groupings | Usually No | Select only when there is a specific need to retain/review this configuration. |
+| Include custom fields | **Yes** | Retains useful course/activity metadata. |
+| Include content bank content | **Yes when used** | Important for H5P and content-bank items. |
 | Include user's state in content such as H5P activities | No | User attempts/state are not required. |
-| Include legacy course files | **Yes** | Includes older files that may contribute to storage or course content. |
+| Include legacy course files | **Yes when relevant** | Includes older Moodle-hosted files that may still contribute to the course/storage footprint. |
 
 ## Moodle backup wizard
 
 ### 1. Initial settings
 
-Apply the settings above, then select **Next**.
+Apply the settings above and select **Next**.
 
 ### 2. Schema settings
 
-Keep all course sections, activities and resources selected for a complete audit. Leave separate user-data options unselected.
+For a complete structural/content audit, keep all course sections, activities and resources selected.
+
+Leave separate user-data options unselected unless there is a specific authorised requirement.
 
 ### 3. Confirmation and review
 
-Confirm that the format is Moodle backup (`.mbz`), activities/resources and files are included, required course items remain selected, and enrolled users, logs, completion and grades are excluded. Then select **Perform backup**.
+Before starting the backup, confirm that:
+
+- the format is Moodle backup (`.mbz`);
+- activities/resources are included;
+- files are included;
+- required sections/course items remain selected;
+- enrolled users, logs, completion and grades are excluded unless specifically needed.
+
+Then select **Perform backup**.
 
 ### 4. Perform backup
 
-Wait for Moodle to finish. Courses containing uploaded video can create large backups and take longer.
+Wait for Moodle to complete the backup. Courses containing large Moodle-hosted media can create large `.mbz` files and take longer.
 
-### 5. Complete
+### 5. Download and store securely
 
-Download the `.mbz` and store it securely. Do not commit Moodle backups to a public Git repository.
+Download the `.mbz` and store it in an authorised location.
+
+Do not commit real Moodle backups to a public Git repository.
 
 ## Why these choices matter
 
-This configuration captures course design, content, files, storage and hosting evidence while avoiding unnecessary learner data. The critical selections are activities/resources, files and filters. Blocks, custom fields, content-bank content and legacy files improve completeness.
+The course analysis platform can only report evidence that exists in the supplied backup.
+
+Particularly important dependencies are:
+
+```text
+Activities/resources
+        |
+        +--> course structure and activity analysis
+        |
+Files --+--> storage/media analysis
+        |
+        +--> file extraction
+                 |
+                 +--> content mapper
+```
+
+The content mapper needs both:
+
+- auditor datasets describing the Moodle structure and resource placement; and
+- actual files recovered by the extractor.
+
+Therefore, excluding files can make both extraction and content mapping incomplete.
 
 ## If different options are selected
 
-The auditor should normally analyse the evidence available rather than fail. However, excluded content cannot be reported reliably:
+The tools normally analyse the evidence available rather than treating every missing category as an error. However:
 
-- Without files, storage and Moodle-hosted-video findings are incomplete.
-- Without activities, structure and external-reference analysis is incomplete.
-- Without the question bank, zero questions does not prove that the live course contains none.
-- Without content-bank content, H5P/content-bank findings may be incomplete.
-- Including users, grades or logs may add unnecessary sensitive data even if the auditor ignores it.
+- without files, storage figures and Moodle-hosted-media analysis are incomplete;
+- without activities/resources, structure and external-reference analysis are incomplete;
+- without the question bank, zero questions does not prove that the live course contains none;
+- without content-bank content, H5P/content-bank evidence may be incomplete;
+- including users, logs or grades may introduce unnecessary sensitive information even if a script does not use it.
 
-Use consistent selections when comparing several courses.
+Use consistent backup selections when comparing multiple courses or comparing before/after versions.
 
-## Accuracy and responsible use
+## Run the platform
 
-The auditor reports evidence in the supplied backup. Results can be affected by Moodle version, installed plugins, backup selections and inconsistent metadata. External references are identified but not opened or availability-tested. Uploaded documents, videos, H5P and SCORM packages are inventoried from metadata rather than interpreted internally.
-
-Treat review flags as prompts for checking and verify material findings against Moodle before consequential decisions. The audit supports—but does not replace—academic review, accessibility testing, quality assurance, data-protection review or Moodle administration.
-
-## Run the audit
+From the repository root, activate the environment:
 
 ```bash
 source .venv/bin/activate
-
-python moodle_mbz_course_auditor.py "course-backup.mbz" \
-  --output "output/course_audit"
-
-python moodle_dashboard_generator.py "output/course_audit"
-
-open "output/course_audit/dashboard.html"
 ```
 
-On Windows or Linux, open `dashboard.html` from the file manager or browser if the macOS `open` command is unavailable.
+Place one or more backups in:
+
+```text
+batch_input/
+```
+
+For example:
+
+```text
+batch_input/
+`-- literature-review-2025.mbz
+```
+
+### Standard audit and dashboard
+
+```bash
+python3 src/orchestrator.py
+```
+
+### Audit, dashboard and file extraction
+
+```bash
+python3 src/orchestrator.py --extract-files
+```
+
+### Audit, dashboard, extraction and content map
+
+```bash
+python3 src/orchestrator.py --content-map
+```
+
+The orchestrator automatically enables extraction because `content_mapper.py` depends on the recovered files and auditor outputs.
+
+### Full normal per-course workflow
+
+```bash
+python3 src/orchestrator.py --full
+```
+
+This runs the main auditor, dashboard, extractor, content mapper and settings analyser.
+
+Generated results are written to:
+
+```text
+batch_output/
+```
+
+unless another output folder is explicitly supplied.
+
+## Before/after comparison
+
+Comparison is a separate workflow because it needs two specific backups:
+
+```bash
+python3 src/compare_mbz.py \
+  earlier-course.mbz \
+  later-course.mbz \
+  --output-dir comparison_output
+```
+
+For meaningful comparisons, use equivalent Moodle backup selections for both versions wherever possible.
+
+## Accuracy and responsible use
+
+The platform reports evidence contained in the backup. Results can be affected by:
+
+- Moodle version;
+- installed plugins;
+- backup selections;
+- incomplete/inconsistent metadata.
+
+External references are identified from stored metadata but are not necessarily opened or availability-tested.
+
+The main audit inventories uploaded files using Moodle metadata; it does not semantically interpret uploaded PDFs, Word documents, presentations, videos, H5P or SCORM content.
+
+Treat flags and differences as prompts for checking. Verify material findings against the source Moodle course before consequential decisions.
+
+The platform supports, but does not replace, academic review, accessibility testing, quality assurance, data-protection review or Moodle administration.
