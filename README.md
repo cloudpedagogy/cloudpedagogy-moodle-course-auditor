@@ -95,13 +95,15 @@ See [`HANDBOOK.md`](HANDBOOK.md) for detailed workflows, script outputs, depende
 
 <p align="center"><em>Example of Moodle-hosted files reconstructed from an MBZ backup.</em></p>
 
-### Audit datasets
+### HTML course content mapping
+
+The content mapper generates a browsable HTML representation of the Moodle course structure, with filtering, links to recovered Moodle-hosted resources, external links and expandable review metadata.
 
 <p align="center">
-  <img src="img/audit.png" alt="Generated Moodle audit datasets" width="600">
+  <img src="img/content-mapping.png" alt="HTML Moodle course content map" width="800">
 </p>
 
-<p align="center"><em>Generated audit datasets available for further analysis.</em></p>
+<p align="center"><em>Example HTML course content map generated from the audited course structure and extracted resources.</em></p>
 
 > Screenshots are illustrative. Available reports, dashboard panels and extracted resources depend on the course and Moodle backup selections.
 
