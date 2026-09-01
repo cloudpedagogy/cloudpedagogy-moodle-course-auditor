@@ -79,37 +79,6 @@ See [`HANDBOOK.md`](HANDBOOK.md) for detailed workflows, script outputs, depende
   <img src="img/data_viz1.png" alt="Sample dashboard screenshot 1" width="800">
 </p>
 
-<p align="center"><em>Sample data visualisation — screenshot 1.</em></p>
-
-<p align="center">
-  <img src="img/data_viz2.png" alt="Sample dashboard screenshot 2" width="800">
-</p>
-
-<p align="center"><em>Sample data visualisation — screenshot 2.</em></p>
-
-<p align="center">
-  <img src="img/data_viz3.png" alt="Sample dashboard screenshot 3" width="800">
-</p>
-
-<p align="center"><em>Sample data visualisation — screenshot 3.</em></p>
-
-### Extracted Moodle resources
-
-<p align="center">
-  <img src="img/moodle_extracted_files.png" alt="Extracted Moodle course resources" width="600">
-</p>
-
-<p align="center"><em>Example of Moodle-hosted files reconstructed from an MBZ backup.</em></p>
-
-### HTML course content mapping
-
-The content mapper generates a browsable HTML representation of the Moodle course structure, with filtering, links to recovered Moodle-hosted resources, external links and expandable review metadata.
-
-<p align="center">
-  <img src="img/content-mapping.png" alt="HTML Moodle course content map" width="800">
-</p>
-
-<p align="center"><em>Example HTML course content map generated from the audited course structure and extracted resources.</em></p>
 
 > Screenshots are illustrative. Available reports, dashboard panels and extracted resources depend on the course and Moodle backup selections.
 
