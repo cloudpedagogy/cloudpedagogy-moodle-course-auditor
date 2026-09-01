@@ -71,16 +71,7 @@ The platform is an evidence-gathering tool. It does not assign pedagogic-quality
 
 See [`HANDBOOK.md`](HANDBOOK.md) for detailed workflows, script outputs, dependencies, interpretation guidance and troubleshooting.
 
-## Example outputs
 
-### Sample dashboard visualisations
-
-<p align="center">
-  <img src="img/data_viz1.png" alt="Sample dashboard screenshot 1" width="800">
-</p>
-
-
-> Screenshots are illustrative. Available reports, dashboard panels and extracted resources depend on the course and Moodle backup selections.
 
 ## Repository structure
 
