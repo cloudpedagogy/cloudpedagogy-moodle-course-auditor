@@ -16,27 +16,33 @@ dependencies between them.
 
 ``` text
                          Moodle .mbz
-                              |
-          +-------------------+-------------------+
-          |                   |                   |
-          v                   v                   v
-       Auditor             Extractor       Settings analyser
-          |                   |
-          +----> Dashboard    |
-          |                   |
-          +---------+---------+
-                    |
+                             |
+          +------------------+------------------+
+          |                  |                  |
+          v                  v                  v
+       Auditor            Extractor       Settings analyser
+          |                  |
+          +----> Dashboard   |
+          |                  |
+          +--------+---------+
+                   |
            audit + extracted
                resources
-                    |
-                    v
-              Content mapper
+                   |
+                   v
+             Content mapper
 
 
        Before .mbz + After .mbz
                   |
                   v
               Comparator
+
+
+         Moodle .mbz / folder
+                  |
+                  v
+          Search / Inspector
 ```
 
 The **content mapper is dependency-aware**: it does not read an `.mbz`
@@ -53,113 +59,42 @@ searches one backup or a batch of backups directly and is not invoked by
 
 ## Components
 
-  ------------------------------------------------------------------------------
-  Script                                Purpose             Reads
-  ------------------------------------- ------------------- --------------------
-  `src/orchestrator.py`                 Recommended         One `.mbz` or a
-                                        controller for one  folder of `.mbz`
-                                        or many backups.    files
-                                        Selects and runs    
-                                        the required        
-                                        workflow, manages   
-                                        dependencies,       
-                                        output folders,     
-                                        logging and batch   
-                                        status.             
-
-  `src/moodle_mbz_course_auditor.py`    Main Moodle         `.mbz`
-                                        metadata audit.     
-                                        Produces reports,   
-                                        CSV datasets and    
-                                        JSON covering       
-                                        structure,          
-                                        activities, Books,  
-                                        files, media,       
-                                        external            
-                                        dependencies,       
-                                        permissions and     
-                                        other evidence.     
-
-  `src/moodle_dashboard_generator.py`   Creates the         Audit folder
-                                        interactive HTML    
-                                        analytics dashboard 
-                                        from auditor        
-                                        outputs.            
-
-  `src/extract_moodle_files.py`         Reconstructs        `.mbz`
-                                        Moodle-hosted files 
-                                        and organises them  
-                                        by Moodle context,  
-                                        course structure    
-                                        and/or file type.   
-
-  `src/content_mapper.py`               Creates a browsable Auditor outputs +
-                                        HTML content map,   `extracted_files/`
-                                        editable Word map   
-                                        and CSV mapping     
-                                        outputs.            
-
-  `src/analyse_mbz.py`                  Detailed            `.mbz`
-                                        activity/settings   
-                                        analyser covering   
-                                        display modes,      
-                                        visibility, groups, 
-                                        completion,         
-                                        restrictions, file  
-                                        metadata, role      
-                                        overrides and       
-                                        optional domain     
-                                        review rules.       
-
-  `src/compare_mbz.py`                  Compares an earlier Two `.mbz` files
-                                        and later Moodle    
-                                        backup for          
-                                        structural,         
-                                        configuration,      
-                                        content, Book       
-                                        chapter and file    
-                                        changes.            
-
-  `src/search_mbz.py`                   Searches and        One `.mbz` or a
-                                        inspects one or     folder of `.mbz`
-                                        many Moodle backups files
-                                        across text,        
-                                        activities,         
-                                        sections,           
-                                        visibility, forum   
-                                        content retained in 
-                                        the backup,         
-                                        URLs/domains and    
-                                        uploaded-file       
-                                        metadata.           
-  ------------------------------------------------------------------------------
+| Script                              | Purpose                                                                                                                                                                         | Reads                                  |
+|-------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------|
+| `src/orchestrator.py`               | Recommended controller for one or many backups. Selects and runs the required workflow, manages dependencies, output folders, logging and batch status.                         | One `.mbz` or a folder of `.mbz` files |
+| `src/moodle_mbz_course_auditor.py`  | Main Moodle metadata audit. Produces reports, CSV datasets and JSON covering structure, activities, Books, files, media, external dependencies, permissions and other evidence. | `.mbz`                                 |
+| `src/moodle_dashboard_generator.py` | Creates the interactive HTML analytics dashboard from auditor outputs.                                                                                                          | Audit folder                           |
+| `src/extract_moodle_files.py`       | Reconstructs Moodle-hosted files and organises them by Moodle context, course structure and/or file type.                                                                       | `.mbz`                                 |
+| `src/content_mapper.py`             | Creates a browsable HTML content map, editable Word map and CSV mapping outputs.                                                                                                | Auditor outputs + `extracted_files/`   |
+| `src/analyse_mbz.py`                | Detailed activity/settings analyser covering display modes, visibility, groups, completion, restrictions, file metadata, role overrides and optional domain review rules.       | `.mbz`                                 |
+| `src/compare_mbz.py`                | Compares an earlier and later Moodle backup for structural, configuration, content, Book chapter and file changes.                                                              | Two `.mbz` files                       |
+| `src/search_mbz.py`                 | Searches and inspects one or many Moodle backups across text, activities, sections, visibility, forum content retained in the backup, URLs/domains and uploaded-file metadata.  | One `.mbz` or a folder of `.mbz` files |
 
 The tools remain independently runnable. The orchestrator coordinates
 them; it does not replace their internal logic.
 
 ## Key capabilities
 
--   Process one Moodle backup or many backups sequentially.
--   Inventory sections, activities, resources, Moodle Books and uploaded
-    files.
--   Analyse file formats, sizes, storage footprint and largest files.
--   Distinguish Moodle-hosted video from Panopto and other external
-    media.
--   Review hidden, old and potentially duplicated content.
--   Identify external domains and platform dependencies.
--   Report explicit course- and activity-level role capability overrides
-    and recorded enrolment methods.
--   Generate responsive Plotly dashboards.
--   Recover and organise Moodle-hosted files.
--   Produce clickable HTML and editable Word course content maps.
--   Produce detailed settings reports.
--   Compare two Moodle backups and identify meaningful changes.
--   Search one or many backups for text, activity types/names, sections,
-    visibility, forum content, URLs/domains and uploaded-file metadata.
--   Return explicit `FOUND`, `NOT FOUND` and `UNABLE TO DETERMINE`
-    search states where appropriate.
--   Record per-stage success, warnings and failures in
-    `batch_summary.csv`.
+- Process one Moodle backup or many backups sequentially.
+- Inventory sections, activities, resources, Moodle Books and uploaded
+  files.
+- Analyse file formats, sizes, storage footprint and largest files.
+- Distinguish Moodle-hosted video from Panopto and other external media.
+- Review hidden, old and potentially duplicated content.
+- Identify external domains and platform dependencies.
+- Report explicit course- and activity-level role capability overrides
+  and recorded enrolment methods.
+- Generate responsive Plotly dashboards.
+- Recover and organise Moodle-hosted files.
+- Produce clickable HTML and editable Word course content maps.
+- Produce detailed settings reports.
+- Compare two Moodle backups and identify meaningful changes.
+- Search one or many backups for text, activity types/names, sections,
+  visibility, forum content, URLs/domains and uploaded-file metadata.
+- Return explicit `FOUND`, `NOT FOUND` and `UNABLE TO DETERMINE` search
+  states where appropriate.
+- Record per-stage success, warnings and failures in
+  `batch_summary.csv`.
 
 The platform is an evidence-gathering tool. It does not assign
 pedagogic-quality, accessibility, compliance or risk scores.
@@ -196,12 +131,12 @@ the orchestrator.
 
 ## Requirements
 
--   Python 3.10 or later
--   Python 3.13 is recommended for the current project environment
--   Dependencies from `requirements.txt`:
-    -   pandas
-    -   Plotly
-    -   python-docx
+- Python 3.10 or later
+- Python 3.13 is recommended for the current project environment
+- Dependencies from `requirements.txt`:
+  - pandas
+  - Plotly
+  - python-docx
 
 ## Installation
 
@@ -235,14 +170,14 @@ python3 src/orchestrator.py --help
 Create a normal Moodle `.mbz` backup, not an IMS Common Cartridge
 export. For a normal structural/content audit, include:
 
--   activities and resources;
--   files;
--   blocks;
--   filters;
--   custom fields;
--   content-bank content where relevant;
--   legacy course files where relevant;
--   question bank if question analysis is required.
+- activities and resources;
+- files;
+- blocks;
+- filters;
+- custom fields;
+- content-bank content where relevant;
+- legacy course files where relevant;
+- question bank if question analysis is required.
 
 Normally exclude enrolled users, user role assignments, logs, grades,
 completion details and other learner data unless there is a specific
@@ -428,13 +363,13 @@ python3 src/compare_mbz.py \
 
 Typical outputs include:
 
--   `comparison_report.html`
--   `comparison_report.md`
--   `comparison_data.json`
--   `course_changes.csv`
--   `activity_changes.csv`
--   `content_changes.csv`
--   `file_changes.csv`
+- `comparison_report.html`
+- `comparison_report.md`
+- `comparison_data.json`
+- `course_changes.csv`
+- `activity_changes.csv`
+- `content_changes.csv`
+- `file_changes.csv`
 
 ## Existing results
 
