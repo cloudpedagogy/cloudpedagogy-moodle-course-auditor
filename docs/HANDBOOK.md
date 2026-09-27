@@ -11,19 +11,19 @@ to examine one or more Moodle courses from Moodle backup (`.mbz`) files.
 
 It supports:
 
--   structural and technical course review;
--   redesign and migration planning;
--   activity, resource and Moodle Book inventories;
--   file/storage analysis;
--   Moodle-hosted and externally hosted media analysis;
--   external-platform dependency review;
--   explicit course/activity capability override review;
--   hidden, old and potentially duplicated content review;
--   Moodle-hosted file recovery;
--   editable course content mapping;
--   detailed activity/settings analysis;
--   targeted search and inspection across one or many backups;
--   before/after Moodle backup comparison.
+- structural and technical course review;
+- redesign and migration planning;
+- activity, resource and Moodle Book inventories;
+- file/storage analysis;
+- Moodle-hosted and externally hosted media analysis;
+- external-platform dependency review;
+- explicit course/activity capability override review;
+- hidden, old and potentially duplicated content review;
+- Moodle-hosted file recovery;
+- editable course content mapping;
+- detailed activity/settings analysis;
+- targeted search and inspection across one or many backups;
+- before/after Moodle backup comparison.
 
 The platform is an evidence-gathering toolkit. It does not make final
 judgements about course quality.
@@ -41,22 +41,34 @@ not invoked by `orchestrator.py` and is not included in the
 orchestrator's `--full` workflow.
 
 ``` text
-                                  Moodle .mbz
-                                      |
-                    +-----------------+------------------+
-                    |                 |                  |
-                    v                 v                  v
-                  Auditor          Extractor      Settings analyser
-                    |                 |                  |
-                    v                 |                  |
-                Dashboard             |                  |
-                    |                 |                  |
-                    +--------+--------+                  |
-                             |                           |
-                             v                           |
-                       Content mapper                    |
-                                                         |
-     Earlier .mbz + Later .mbz --> Comparator            |
+                         Moodle .mbz
+                             |
+          +------------------+------------------+
+          |                  |                  |
+          v                  v                  v
+       Auditor            Extractor       Settings analyser
+          |                  |
+          +----> Dashboard   |
+          |                  |
+          +--------+---------+
+                   |
+           audit + extracted
+               resources
+                   |
+                   v
+             Content mapper
+
+
+       Earlier .mbz + Later .mbz
+                  |
+                  v
+              Comparator
+
+
+         Moodle .mbz / folder
+                  |
+                  v
+          Search / Inspector
 ```
 
 Important dependency:
@@ -77,10 +89,12 @@ Recommended structure:
 ``` text
 cloudpedagogy-moodle-course-auditor/
 |-- README.md
-|-- HANDBOOK.md
-|-- MOODLE_BACKUP_INSTRUCTIONS.md
-|-- requirements.txt
 |-- LICENSE
+|-- requirements.txt
+|-- docs/
+|   |-- HANDBOOK.md
+|   |-- MOODLE_BACKUP_INSTRUCTIONS.md
+|   `-- SEARCH_COMMANDS.md
 |-- src/
 |   |-- orchestrator.py
 |   |-- moodle_mbz_course_auditor.py
@@ -109,14 +123,14 @@ a folder containing one or more `.mbz` files.
 
 **Responsibilities**
 
--   discovers backups;
--   creates one isolated result folder per backup;
--   runs only scripts needed for the selected workflow;
--   automatically resolves known dependencies;
--   logs commands and results in `processing.log`;
--   records stage statuses in `batch_summary.csv`;
--   continues to later backups after a failure by default;
--   supports suffix, skip and overwrite policies for existing results.
+- discovers backups;
+- creates one isolated result folder per backup;
+- runs only scripts needed for the selected workflow;
+- automatically resolves known dependencies;
+- logs commands and results in `processing.log`;
+- records stage statuses in `batch_summary.csv`;
+- continues to later backups after a failure by default;
+- supports suffix, skip and overwrite policies for existing results.
 
 **Default workflow**
 
@@ -126,26 +140,14 @@ Auditor -> Dashboard
 
 **Optional workflows**
 
-  -----------------------------------------------------------------------
-  Command option                      Effective workflow
-  ----------------------------------- -----------------------------------
-  no additional option                Auditor + Dashboard
-
-  `--extract-files`                   Auditor + Dashboard + Extractor
-
-  `--content-map`                     Auditor + Dashboard + Extractor +
-                                      Content Mapper
-
-  `--settings`                        Auditor + Dashboard + Settings
-                                      Analyser
-
-  `--full`                            Auditor + Dashboard + Extractor +
-                                      Content Mapper + Settings Analyser
-
-  `--no-dashboard`                    Auditor without dashboard; other
-                                      explicitly requested independent
-                                      stages may still run
-  -----------------------------------------------------------------------
+| Command option       | Effective workflow                                                                     |
+|----------------------|----------------------------------------------------------------------------------------|
+| no additional option | Auditor + Dashboard                                                                    |
+| `--extract-files`    | Auditor + Dashboard + Extractor                                                        |
+| `--content-map`      | Auditor + Dashboard + Extractor + Content Mapper                                       |
+| `--settings`         | Auditor + Dashboard + Settings Analyser                                                |
+| `--full`             | Auditor + Dashboard + Extractor + Content Mapper + Settings Analyser                   |
+| `--no-dashboard`     | Auditor without dashboard; other explicitly requested independent stages may still run |
 
 `--content-map` automatically enables extraction.
 
@@ -157,7 +159,7 @@ batch processing.
 
 **Reads**
 
--   Moodle `.mbz`
+- Moodle `.mbz`
 
 **Purpose**
 
@@ -166,54 +168,54 @@ metadata without modifying the backup.
 
 **Typical evidence**
 
--   course metadata;
--   sections and activity sequence;
--   activity types;
--   Moodle Books and chapters;
--   hidden activities;
--   possible duplicate activities;
--   files, sizes and formats;
--   modification dates;
--   embedded/external URLs;
--   Moodle-hosted media;
--   Panopto and other external media;
--   content placement;
--   explicit course/activity role capability overrides;
--   enrolment methods recorded in the backup.
+- course metadata;
+- sections and activity sequence;
+- activity types;
+- Moodle Books and chapters;
+- hidden activities;
+- possible duplicate activities;
+- files, sizes and formats;
+- modification dates;
+- embedded/external URLs;
+- Moodle-hosted media;
+- Panopto and other external media;
+- content placement;
+- explicit course/activity role capability overrides;
+- enrolment methods recorded in the backup.
 
 **Typical outputs**
 
--   `audit_report.md`
--   `audit_report.txt`
--   `audit_data.json`
--   `course_summary.csv`
--   `course_characteristics.csv`
--   `course_footprint.csv`
--   `sections.csv`
--   `activities.csv`
--   `section_activity_breakdown.csv`
--   `book_inventory.csv`
--   `duplicate_activity_inventory.csv`
--   `hidden_content_summary.csv`
--   `hidden_activity_inventory.csv`
--   `files.csv`
--   `file_extension_inventory.csv`
--   `largest_files.csv`
--   `modification_year_summary.csv`
--   `activity_age_summary.csv`
--   `external_dependency_inventory.csv`
--   `external_domain_inventory.csv`
--   `content_inventory.csv`
--   `video_inventory.csv`
--   `audio_inventory.csv`
--   `document_inventory.csv`
--   `interactive_content_inventory.csv`
--   `external_media_inventory.csv`
--   `content_category_summary.csv`
--   `hosting_summary.csv`
--   `content_placement_inventory.csv`
--   `course_permissions.csv`
--   `course_access_summary.csv`
+- `audit_report.md`
+- `audit_report.txt`
+- `audit_data.json`
+- `course_summary.csv`
+- `course_characteristics.csv`
+- `course_footprint.csv`
+- `sections.csv`
+- `activities.csv`
+- `section_activity_breakdown.csv`
+- `book_inventory.csv`
+- `duplicate_activity_inventory.csv`
+- `hidden_content_summary.csv`
+- `hidden_activity_inventory.csv`
+- `files.csv`
+- `file_extension_inventory.csv`
+- `largest_files.csv`
+- `modification_year_summary.csv`
+- `activity_age_summary.csv`
+- `external_dependency_inventory.csv`
+- `external_domain_inventory.csv`
+- `content_inventory.csv`
+- `video_inventory.csv`
+- `audio_inventory.csv`
+- `document_inventory.csv`
+- `interactive_content_inventory.csv`
+- `external_media_inventory.csv`
+- `content_category_summary.csv`
+- `hosting_summary.csv`
+- `content_placement_inventory.csv`
+- `course_permissions.csv`
+- `course_access_summary.csv`
 
 The exact contents depend on the backup.
 
@@ -221,7 +223,7 @@ The exact contents depend on the backup.
 
 **Reads**
 
--   auditor output folder or supported audit JSON input
+- auditor output folder or supported audit JSON input
 
 **Purpose**
 
@@ -231,7 +233,7 @@ It does not parse the `.mbz` itself and does not change the audit data.
 
 **Output**
 
--   normally `dashboard.html`
+- normally `dashboard.html`
 
 Depending on available datasets, the dashboard can visualise structure,
 activity mix, Moodle Books, files, media, hosting/provider patterns,
@@ -244,7 +246,7 @@ Optional panels are skipped when supporting evidence is absent.
 
 **Reads**
 
--   Moodle `.mbz` or an already extracted Moodle backup directory
+- Moodle `.mbz` or an already extracted Moodle backup directory
 
 **Purpose**
 
@@ -254,12 +256,11 @@ useful organisational views while retaining provenance.
 
 **Views**
 
--   `context` --- authoritative Moodle component/file-area/item
-    provenance;
--   `course` --- best-effort section/activity/chapter organisation;
--   `type` --- PDFs, documents, data, images, video and other
-    categories;
--   `all` --- all three views.
+- `context` --- authoritative Moodle component/file-area/item
+  provenance;
+- `course` --- best-effort section/activity/chapter organisation;
+- `type` --- PDFs, documents, data, images, video and other categories;
+- `all` --- all three views.
 
 **Typical outputs**
 
@@ -327,7 +328,7 @@ the audited current structure for review/redesign work.
 
 **Reads**
 
--   Moodle `.mbz`
+- Moodle `.mbz`
 
 **Purpose**
 
@@ -336,16 +337,16 @@ course audit.
 
 It can report:
 
--   URL/resource display modes;
--   visibility;
--   group mode;
--   completion mode;
--   availability restrictions;
--   attached-file counts/sizes;
--   explicit role overrides;
--   duplicate URL destinations;
--   domain-level display-mode consistency;
--   optional rules requiring selected domains to open in a new window.
+- URL/resource display modes;
+- visibility;
+- group mode;
+- completion mode;
+- availability restrictions;
+- attached-file counts/sizes;
+- explicit role overrides;
+- duplicate URL destinations;
+- domain-level display-mode consistency;
+- optional rules requiring selected domains to open in a new window.
 
 **Outputs**
 
@@ -370,8 +371,8 @@ The rule is a review rule, not a universal Moodle correctness rule.
 
 **Reads**
 
--   an earlier `.mbz`;
--   a later `.mbz`.
+- an earlier `.mbz`;
+- a later `.mbz`.
 
 **Purpose**
 
@@ -379,15 +380,15 @@ Compares two Moodle backups without modifying them.
 
 It can detect meaningful differences in:
 
--   course settings;
--   sections;
--   activity additions/removals;
--   activity visibility/completion/availability;
--   selected activity settings;
--   URLs;
--   textual content;
--   Moodle Book chapters/content;
--   files and content hashes.
+- course settings;
+- sections;
+- activity additions/removals;
+- activity visibility/completion/availability;
+- selected activity settings;
+- URLs;
+- textual content;
+- Moodle Book chapters/content;
+- files and content hashes.
 
 Technical-only differences such as backup timestamps are intentionally
 excluded where appropriate.
@@ -412,8 +413,8 @@ types receive deeper content comparison than others.
 
 **Reads**
 
--   one Moodle `.mbz`; or
--   a folder containing multiple Moodle `.mbz` files.
+- one Moodle `.mbz`; or
+- a folder containing multiple Moodle `.mbz` files.
 
 **Purpose**
 
@@ -422,22 +423,22 @@ without restoring the course to a Moodle server.
 
 It can search/filter by:
 
--   literal text or multiple terms;
--   regular expressions;
--   case sensitivity;
--   activity type;
--   activity name;
--   selected Moodle XML fields;
--   section;
--   visible/hidden state;
--   URL/domain;
--   forum discussions/posts retained in the backup;
--   uploaded-file name;
--   uploaded-file type;
--   scope (`course`, `section`, `activity`, `activity_content`, `file`);
--   excluded text;
--   result mode (`all`, `found`, `missing`);
--   batch and recursive batch input.
+- literal text or multiple terms;
+- regular expressions;
+- case sensitivity;
+- activity type;
+- activity name;
+- selected Moodle XML fields;
+- section;
+- visible/hidden state;
+- URL/domain;
+- forum discussions/posts retained in the backup;
+- uploaded-file name;
+- uploaded-file type;
+- scope (`course`, `section`, `activity`, `activity_content`, `file`);
+- excluded text;
+- result mode (`all`, `found`, `missing`);
+- batch and recursive batch input.
 
 Multiple search filters can be combined. Combined filters constrain the
 same search; they do not automatically run a separate independent search
@@ -447,12 +448,12 @@ for each filter.
 
 Search uses explicit states:
 
--   `FOUND` --- matching evidence was found;
--   `NOT FOUND` --- the relevant evidence was available but no match was
-    found;
--   `UNABLE TO DETERMINE` --- the backup does not contain enough
-    evidence to make the requested determination;
--   `FAILED` --- the backup could not be processed successfully.
+- `FOUND` --- matching evidence was found;
+- `NOT FOUND` --- the relevant evidence was available but no match was
+  found;
+- `UNABLE TO DETERMINE` --- the backup does not contain enough evidence
+  to make the requested determination;
+- `FAILED` --- the backup could not be processed successfully.
 
 This distinction is especially important for forum-post searches. A
 Moodle backup may contain the forum activity and its description but
@@ -492,55 +493,21 @@ export.
 For a normal structural/content audit, the most important selections
 are:
 
-  -----------------------------------------------------------------------
-  Backup item             Recommendation          Why
-  ----------------------- ----------------------- -----------------------
-  Activities and          Include                 Required for structure
-  resources                                       and activity/resource
-                                                  analysis.
+| Backup item              | Recommendation                                                                                                                                                   | Why                                                                           |
+|--------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| Activities and resources | Include                                                                                                                                                          | Required for structure and activity/resource analysis.                        |
+| Files                    | Include                                                                                                                                                          | Required for storage/file/media analysis and content mapping.                 |
+| Blocks                   | Include                                                                                                                                                          | Provides a fuller representation of configuration.                            |
+| Filters                  | Include                                                                                                                                                          | Retains relevant embedding/content processing configuration.                  |
+| Custom fields            | Include                                                                                                                                                          | Retains useful metadata.                                                      |
+| Content bank             | Include when used                                                                                                                                                | Important for H5P/content-bank items.                                         |
+| Legacy course files      | Include when relevant                                                                                                                                            | Retains older stored resources.                                               |
+| Question bank            | Optional                                                                                                                                                         | Include for question metadata analysis.                                       |
+| Enrolled users           | Normally exclude for structural/content analysis; include when an authorised search requires retained user-generated activity content such as actual forum posts | Increases privacy risk, but some forum/post evidence may otherwise be absent. |
+| Logs, grades, completion | Normally exclude                                                                                                                                                 | Not required by the current normal audit workflow.                            |
 
-  Files                   Include                 Required for
-                                                  storage/file/media
-                                                  analysis and content
-                                                  mapping.
-
-  Blocks                  Include                 Provides a fuller
-                                                  representation of
-                                                  configuration.
-
-  Filters                 Include                 Retains relevant
-                                                  embedding/content
-                                                  processing
-                                                  configuration.
-
-  Custom fields           Include                 Retains useful
-                                                  metadata.
-
-  Content bank            Include when used       Important for
-                                                  H5P/content-bank items.
-
-  Legacy course files     Include when relevant   Retains older stored
-                                                  resources.
-
-  Question bank           Optional                Include for question
-                                                  metadata analysis.
-
-  Enrolled users          Normally exclude for    Increases privacy risk,
-                          structural/content      but some forum/post
-                          analysis; include when  evidence may otherwise
-                          an authorised search    be absent.
-                          requires retained       
-                          user-generated activity 
-                          content such as actual  
-                          forum posts             
-
-  Logs, grades,           Normally exclude        Not required by the
-  completion                                      current normal audit
-                                                  workflow.
-  -----------------------------------------------------------------------
-
-See `MOODLE_BACKUP_INSTRUCTIONS.md` for the complete backup-setting
-table.
+See [`MOODLE_BACKUP_INSTRUCTIONS.md`](MOODLE_BACKUP_INSTRUCTIONS.md) for
+the complete backup-setting table.
 
 For lightweight Search workflows, the exact selections depend on the
 evidence being sought. Activities/resources are the principal
@@ -660,18 +627,18 @@ python3 src/orchestrator.py --full
 
 The orchestrator records:
 
--   source backup/path;
--   course output folder;
--   overall status;
--   audit status;
--   dashboard status;
--   extraction status;
--   content-map status;
--   settings status;
--   start/finish times;
--   duration;
--   output paths;
--   messages/warnings.
+- source backup/path;
+- course output folder;
+- overall status;
+- audit status;
+- dashboard status;
+- extraction status;
+- content-map status;
+- settings status;
+- start/finish times;
+- duration;
+- output paths;
+- messages/warnings.
 
 ### Step 5 --- inspect course results
 
@@ -744,18 +711,11 @@ python3 src/orchestrator.py --recursive
 
 ### Existing output policy
 
-  -----------------------------------------------------------------------
-  Policy                              Behaviour
-  ----------------------------------- -----------------------------------
-  `suffix`                            Default. Preserve existing result
-                                      and create `_2`, `_3`, etc.
-
-  `skip`                              Do not rerun a course when its
-                                      derived folder already exists.
-
-  `overwrite`                         Remove/rebuild the matching
-                                      generated course-run folder.
-  -----------------------------------------------------------------------
+| Policy      | Behaviour                                                     |
+|-------------|---------------------------------------------------------------|
+| `suffix`    | Default. Preserve existing result and create `_2`, `_3`, etc. |
+| `skip`      | Do not rerun a course when its derived folder already exists. |
+| `overwrite` | Remove/rebuild the matching generated course-run folder.      |
 
 Examples:
 
@@ -776,10 +736,10 @@ python3 src/orchestrator.py \
 
 Possible extraction modes:
 
--   `context`
--   `course`
--   `type`
--   `all`
+- `context`
+- `course`
+- `type`
+- `all`
 
 Storage mode:
 
@@ -964,19 +924,19 @@ python3 src/search_mbz.py --help
 Use the dashboard for broad patterns and discussion. Depending on
 evidence, it may show:
 
--   headline course/section/activity/file totals;
--   activity type mix;
--   activities by section;
--   Moodle Books;
--   hidden/duplicate content;
--   file formats/storage;
--   Moodle-hosted video;
--   Panopto/external video;
--   hosting/provider summaries;
--   external domains/dependencies;
--   permissions/access evidence;
--   modification age;
--   filterable content-level records.
+- headline course/section/activity/file totals;
+- activity type mix;
+- activities by section;
+- Moodle Books;
+- hidden/duplicate content;
+- file formats/storage;
+- Moodle-hosted video;
+- Panopto/external video;
+- hosting/provider summaries;
+- external domains/dependencies;
+- permissions/access evidence;
+- modification age;
+- filterable content-level records.
 
 ### Content map
 
@@ -1024,12 +984,12 @@ backup's course- and activity-level `roles.xml` files.
 
 Typical evidence includes:
 
--   context;
--   role;
--   capability;
--   `Allow`, `Prevent` or `Prohibit`;
--   activity/course location;
--   selected Student restrictions for review.
+- context;
+- role;
+- capability;
+- `Allow`, `Prevent` or `Prohibit`;
+- activity/course location;
+- selected Student restrictions for review.
 
 These are not a complete effective-permission calculation. Site-level
 role definitions, assignments, group membership and other wider Moodle
@@ -1042,32 +1002,32 @@ The platform analyses Moodle backup XML and file metadata.
 The main auditor and Search component do not semantically interpret the
 internal contents of uploaded:
 
--   PDFs;
--   Word files;
--   presentations;
--   images;
--   audio/video;
--   SCORM packages;
--   H5P packages.
+- PDFs;
+- Word files;
+- presentations;
+- images;
+- audio/video;
+- SCORM packages;
+- H5P packages.
 
 It cannot by itself determine:
 
--   pedagogic effectiveness;
--   learning-outcome alignment;
--   academic accuracy;
--   accessibility compliance;
--   copyright compliance;
--   whether a learner understood content;
--   whether an external URL still works;
--   every user's final effective permissions.
+- pedagogic effectiveness;
+- learning-outcome alignment;
+- academic accuracy;
+- accessibility compliance;
+- copyright compliance;
+- whether a learner understood content;
+- whether an external URL still works;
+- every user's final effective permissions.
 
 Findings are affected by:
 
--   Moodle version;
--   installed plugins;
--   backup selections;
--   metadata conventions;
--   unusual third-party activity structures.
+- Moodle version;
+- installed plugins;
+- backup selections;
+- metadata conventions;
+- unusual third-party activity structures.
 
 Verify consequential findings against the live/source Moodle course.
 
@@ -1075,17 +1035,17 @@ Verify consequential findings against the live/source Moodle course.
 
 Before processing:
 
--   confirm authority to use the course backup;
--   exclude unnecessary learner/user data;
--   use an approved, access-controlled environment;
--   determine appropriate retention.
+- confirm authority to use the course backup;
+- exclude unnecessary learner/user data;
+- use an approved, access-controlled environment;
+- determine appropriate retention.
 
 After processing:
 
--   protect `.mbz` files and generated results;
--   inspect titles, URLs and filenames before sharing;
--   do not publish real backups or extracted resources to public GitHub;
--   remove working data when no longer required.
+- protect `.mbz` files and generated results;
+- inspect titles, URLs and filenames before sharing;
+- do not publish real backups or extracted resources to public GitHub;
+- remove working data when no longer required.
 
 Local processing improves control but does not remove data-protection
 responsibilities.
@@ -1187,12 +1147,12 @@ Keep compatible versions of the component scripts together.
 
 When output schemas or command interfaces change:
 
--   update `README.md`;
--   update this handbook;
--   update `SEARCH_COMMANDS.md` when the Search interface changes;
--   update `MOODLE_BACKUP_INSTRUCTIONS.md` when backup evidence
-    requirements change;
--   update `requirements.txt` when dependencies change.
+- update `README.md`;
+- update this handbook;
+- update `SEARCH_COMMANDS.md` when the Search interface changes;
+- update `MOODLE_BACKUP_INSTRUCTIONS.md` when backup evidence
+  requirements change;
+- update `requirements.txt` when dependencies change.
 
 Real Moodle backups should not be stored as public test fixtures. Prefer
 small anonymised or synthetic fixtures for automated testing.
